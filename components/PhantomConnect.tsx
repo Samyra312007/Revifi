@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   connectPhantom,
   disconnectPhantom,
@@ -22,20 +22,31 @@ export default function PhantomConnect({
 }: Props) {
   const [address, setAddress] = useState<string | null>(initialAddress);
   const [busy, setBusy] = useState(false);
-  const [installed, setInstalled] = useState(true);
-  const supabase = createClient();
+  const [mounted, setMounted] = useState(false);
+  const supabase = useMemo(() => createClient(), []);
+
+  const installed = mounted ? Boolean(getPhantomProvider()) : true;
 
   useEffect(() => {
-    setInstalled(Boolean(getPhantomProvider()));
-    if (!initialAddress) {
-      getConnectedPhantomAddress().then((addr) => {
-        if (addr) {
-          setAddress(addr);
-          onChange?.(addr);
-        }
-      });
-    }
-  }, []);
+    let cancelled = false;
+    const t = setTimeout(() => {
+      if (cancelled) return;
+      setMounted(true);
+      if (!initialAddress) {
+        getConnectedPhantomAddress().then((addr) => {
+          if (cancelled) return;
+          if (addr) {
+            setAddress(addr);
+            onChange?.(addr);
+          }
+        });
+      }
+    }, 0);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [initialAddress, onChange]);
 
   async function persistAddress(addr: string | null) {
     if (!saveToProfile) return;
@@ -56,8 +67,9 @@ export default function PhantomConnect({
       setAddress(addr);
       onChange?.(addr);
       await persistAddress(addr);
-    } catch (err: any) {
-      alert(err?.message || "Failed to connect Phantom");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      alert(message || "Failed to connect Phantom");
     } finally {
       setBusy(false);
     }
@@ -70,8 +82,9 @@ export default function PhantomConnect({
       setAddress(null);
       onChange?.(null);
       await persistAddress(null);
-    } catch (err: any) {
-      alert(err?.message || "Failed to disconnect");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      alert(message || "Failed to disconnect");
     } finally {
       setBusy(false);
     }

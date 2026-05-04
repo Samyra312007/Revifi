@@ -3,8 +3,9 @@ import { createClient } from "@/lib/supabase/server";
 import {
   isValidSolanaAddress,
   transferUsdcFromTreasury,
+  transferSolFromTreasury,
   verifySolanaTransaction,
-} from "@/lib/solana";
+} from "@/lib/solana/server";
 
 export async function POST(req: Request) {
   try {
@@ -23,12 +24,14 @@ export async function POST(req: Request) {
       amount,
       destination,
       signature,
+      sol_amount,
     }: {
       method: "bank" | "crypto";
       asset?: "SOL" | "USDC" | "USD";
       amount: number;
       destination?: string;
       signature?: string;
+      sol_amount?: number;
     } = body;
 
     if (!method || !amount || amount <= 0) {
@@ -58,6 +61,27 @@ export async function POST(req: Request) {
         txSignature = signature;
       } else {
         const result = await transferUsdcFromTreasury(destination!, amount);
+        txSignature = result.signature;
+        simulated = result.simulated;
+        onChainConfirmed = !result.simulated;
+      }
+    } else if (method === "crypto" && asset === "SOL") {
+      if (signature) {
+        const verification = await verifySolanaTransaction(signature);
+        onChainConfirmed = verification.confirmed;
+        txSignature = signature;
+      } else {
+        const solToSend = Number(sol_amount) || 0;
+        if (!solToSend) {
+          return NextResponse.json(
+            {
+              error:
+                "SOL withdrawals require either a Phantom-signed signature or a sol_amount value.",
+            },
+            { status: 400 },
+          );
+        }
+        const result = await transferSolFromTreasury(destination!, solToSend);
         txSignature = result.signature;
         simulated = result.simulated;
         onChainConfirmed = !result.simulated;
@@ -113,7 +137,7 @@ export async function POST(req: Request) {
       message: `$${Number(amount).toFixed(2)} withdrawal via ${method}${
         simulated ? " (simulated)" : ""
       }.`,
-      type: "payment",
+      type: "withdrawal",
       metadata: { withdrawal_id: withdrawal.id },
     });
 
@@ -123,11 +147,10 @@ export async function POST(req: Request) {
       tx_signature: txSignature,
       simulated,
     });
-  } catch (error: any) {
+  } catch (error) {
     console.error("Withdraw error:", error);
-    return NextResponse.json(
-      { error: error?.message || "Internal server error" },
-      { status: 500 },
-    );
+    const message =
+      error instanceof Error ? error.message : "Internal server error";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

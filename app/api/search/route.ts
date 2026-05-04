@@ -3,6 +3,34 @@ import { createClient } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
 
+interface InvoiceSearchRow {
+  id: string;
+  deal_name: string;
+  amount: number;
+  status: string;
+  brands?: { company_name?: string } | { company_name?: string }[] | null;
+}
+
+interface TransactionSearchRow {
+  id: string;
+  type: string;
+  amount: number;
+  status: string;
+  created_at: string;
+}
+
+interface BrandSearchRow {
+  id: string;
+  company_name: string;
+  industry?: string | null;
+}
+
+interface NotificationSearchRow {
+  id: string;
+  title: string;
+  message: string;
+}
+
 export async function GET(req: Request) {
   try {
     const supabase = await createClient();
@@ -30,7 +58,6 @@ export async function GET(req: Request) {
       title: string;
       subtitle?: string;
       href: string;
-      meta?: Record<string, any>;
     }> = [];
 
     if (creator) {
@@ -40,7 +67,7 @@ export async function GET(req: Request) {
         .eq("creator_id", creator.id)
         .or(`deal_name.ilike.${like},status.ilike.${like}`)
         .limit(8);
-      (invoices || []).forEach((i: any) => {
+      ((invoices as InvoiceSearchRow[] | null) || []).forEach((i) => {
         const brandName = Array.isArray(i.brands)
           ? i.brands?.[0]?.company_name
           : i.brands?.company_name;
@@ -61,7 +88,7 @@ export async function GET(req: Request) {
       .or(`type.ilike.${like},status.ilike.${like}`)
       .order("created_at", { ascending: false })
       .limit(8);
-    (txs || []).forEach((t: any) => {
+    ((txs as TransactionSearchRow[] | null) || []).forEach((t) => {
       results.push({
         type: "transaction",
         id: t.id,
@@ -76,7 +103,7 @@ export async function GET(req: Request) {
       .select("id, company_name, industry")
       .ilike("company_name", like)
       .limit(5);
-    (brands || []).forEach((b: any) => {
+    ((brands as BrandSearchRow[] | null) || []).forEach((b) => {
       results.push({
         type: "brand",
         id: b.id,
@@ -93,7 +120,7 @@ export async function GET(req: Request) {
       .or(`title.ilike.${like},message.ilike.${like}`)
       .order("created_at", { ascending: false })
       .limit(5);
-    (notifications || []).forEach((n: any) => {
+    ((notifications as NotificationSearchRow[] | null) || []).forEach((n) => {
       results.push({
         type: "notification",
         id: n.id,
@@ -104,11 +131,10 @@ export async function GET(req: Request) {
     });
 
     return NextResponse.json({ results });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Search error:", error);
-    return NextResponse.json(
-      { error: error?.message || "Internal server error" },
-      { status: 500 },
-    );
+    const message =
+      error instanceof Error ? error.message : "Internal server error";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

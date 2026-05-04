@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import AuthButton from "@/components/AuthButton";
 import NotificationBell from "@/components/NotificationBell";
@@ -53,31 +54,15 @@ export default function CreatorDashboard() {
   const [monthly, setMonthly] = useState<MonthlyPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAdvanceModal, setShowAdvanceModal] = useState(false);
-  const [selectedInvoice, setSelectedInvoice] = useState<any>(null);
+  const [selectedInvoice, setSelectedInvoice] = useState<UpcomingPayout | null>(
+    null,
+  );
+  const [advanceAmountInput, setAdvanceAmountInput] = useState<string>("");
 
   const supabase = createClient();
+  const router = useRouter();
 
-  useEffect(() => {
-    fetchDashboardData();
-
-    const subscription = supabase
-      .channel("transactions_changes")
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "transactions" },
-        (payload) => {
-          console.log("New transaction:", payload);
-          fetchDashboardData();
-        },
-      )
-      .subscribe();
-
-    return () => {
-      subscription.unsubscribe();
-    };
-  }, []);
-
-  async function fetchDashboardData() {
+  const fetchDashboardData = useCallback(async () => {
     setLoading(true);
 
     const {
@@ -85,7 +70,7 @@ export default function CreatorDashboard() {
     } = await supabase.auth.getUser();
 
     if (!user) {
-      setLoading(false);
+      router.push("/?signin=1");
       return;
     }
 
@@ -127,8 +112,16 @@ export default function CreatorDashboard() {
       .limit(5);
 
     if (payouts) {
+      type PayoutRow = {
+        id: string;
+        deal_name: string;
+        amount: number;
+        due_date: string;
+        status: string;
+        brands?: { company_name?: string } | { company_name?: string }[] | null;
+      };
       setUpcomingPayouts(
-        payouts.map((p: any) => ({
+        (payouts as PayoutRow[]).map((p) => ({
           id: p.id,
           deal_name: p.deal_name,
           brand_name: Array.isArray(p.brands)
@@ -158,7 +151,15 @@ export default function CreatorDashboard() {
       .limit(10);
 
     if (transactions) {
-      const mapped = transactions.map((t: any) => ({
+      type TxRow = {
+        id: string;
+        type: string;
+        amount: number;
+        status: string;
+        created_at: string;
+        invoice?: { deal_name?: string } | { deal_name?: string }[] | null;
+      };
+      const mapped = (transactions as TxRow[]).map((t) => ({
         id: t.id,
         type: t.type,
         amount: t.amount,
@@ -187,7 +188,39 @@ export default function CreatorDashboard() {
     }
 
     setLoading(false);
-  }
+  }, [supabase, router]);
+
+  useEffect(() => {
+    let unsubFn: (() => void) | null = null;
+
+    (async () => {
+      await fetchDashboardData();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const subscription = supabase
+        .channel(`dashboard_tx_${user.id}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "transactions",
+            filter: `user_id=eq.${user.id}`,
+          },
+          () => fetchDashboardData(),
+        )
+        .subscribe();
+
+      unsubFn = () => subscription.unsubscribe();
+    })();
+
+    return () => {
+      if (unsubFn) unsubFn();
+    };
+  }, [fetchDashboardData, supabase]);
 
   async function requestAdvance(invoiceId: string, amount: number) {
     try {
@@ -292,9 +325,6 @@ export default function CreatorDashboard() {
 
         <div className="flex items-center gap-4">
           <NotificationBell />
-          <button className="hover:bg-white/5 rounded-full p-2 transition-all text-slate-400">
-            <span className="material-symbols-outlined">history</span>
-          </button>
           <div className="h-8 w-[1px] bg-white/10 mx-2"></div>
           <button
             onClick={() => setShowAdvanceModal(true)}
@@ -302,11 +332,6 @@ export default function CreatorDashboard() {
           >
             Instant Advance
           </button>
-          <img
-            alt="Creator Profile"
-            className="h-10 w-10 rounded-full border-2 border-purple-500/30 object-cover"
-            src="https://lh3.googleusercontent.com/aida-public/AB6AXuDl_NVkyW8cyz9fizMsYf_e-H4gioVKYojBbAgEnhCkEX4Pc_yNkMumxkS6Af3EGQri09xvAWBX0KqVCMkmkKizeRo99AahLCBv_yBg0k5QI51ayNXWYqLn_ueWiBiyLaUnh1bajooI-YteZSS-mtK34WoABDmSUUUOVnMUoZ-MtI1Isfwcr7ZohWQ2SqyAjyqozccoD_m8gu7sUcGCCgVVUGgYxAUOQX6YCZ3iCPgUJ5JV9jZq0rFh-PAt4xkf92HFNhUmcuPI7j1Q"
-          />
         </div>
       </header>
 
@@ -477,9 +502,12 @@ export default function CreatorDashboard() {
               <h3 className="font-headline-md text-on-surface">
                 Recent Transactions
               </h3>
-              <button className="text-primary text-sm hover:underline">
+              <Link
+                href="/creator/payments"
+                className="text-primary text-sm hover:underline"
+              >
                 View All
-              </button>
+              </Link>
             </div>
             <div className="space-y-3">
               {recentTransactions.length === 0 ? (
@@ -596,11 +624,15 @@ export default function CreatorDashboard() {
                   Select Invoice
                 </label>
                 <select
+                  value={selectedInvoice?.id || ""}
                   onChange={(e) => {
-                    const selected = upcomingPayouts.find(
-                      (p) => p.id === e.target.value,
-                    );
+                    const selected =
+                      upcomingPayouts.find((p) => p.id === e.target.value) ||
+                      null;
                     setSelectedInvoice(selected);
+                    setAdvanceAmountInput(
+                      selected ? String(selected.amount) : "",
+                    );
                   }}
                   className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white"
                 >
@@ -622,23 +654,35 @@ export default function CreatorDashboard() {
                   </label>
                   <input
                     type="number"
-                    defaultValue={selectedInvoice.amount}
+                    value={advanceAmountInput}
+                    onChange={(e) => setAdvanceAmountInput(e.target.value)}
                     max={selectedInvoice.amount}
                     className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white"
                   />
                   <p className="text-xs text-slate-500 mt-1">
-                    You'll receive: $
-                    {(selectedInvoice.amount * 0.95).toLocaleString()} (after 5%
-                    fee)
+                    You&apos;ll receive: $
+                    {(
+                      (Number(advanceAmountInput) || 0) * 0.95
+                    ).toLocaleString()}{" "}
+                    (after 5% fee). Max: $
+                    {selectedInvoice.amount.toLocaleString()}
                   </p>
                 </div>
               )}
 
               <button
-                onClick={() =>
-                  selectedInvoice &&
-                  requestAdvance(selectedInvoice.id, selectedInvoice.amount)
-                }
+                onClick={() => {
+                  if (!selectedInvoice) return;
+                  const requested =
+                    Number(advanceAmountInput) || selectedInvoice.amount;
+                  if (requested <= 0 || requested > selectedInvoice.amount) {
+                    alert(
+                      `Amount must be between 1 and ${selectedInvoice.amount}`,
+                    );
+                    return;
+                  }
+                  requestAdvance(selectedInvoice.id, requested);
+                }}
                 disabled={!selectedInvoice}
                 className={`w-full py-3 rounded-lg font-semibold transition-all ${
                   selectedInvoice

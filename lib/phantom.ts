@@ -1,3 +1,5 @@
+import type { Transaction } from "@solana/web3.js";
+
 export interface PhantomProvider {
   isPhantom?: boolean;
   publicKey?: { toString(): string } | null;
@@ -6,16 +8,22 @@ export interface PhantomProvider {
     publicKey: { toString(): string };
   }>;
   disconnect: () => Promise<void>;
-  on: (event: string, handler: (...args: any[]) => void) => void;
+  on: (event: string, handler: (...args: unknown[]) => void) => void;
   removeAllListeners?: () => void;
-  signAndSendTransaction?: (tx: any) => Promise<{ signature: string }>;
-  signTransaction?: (tx: any) => Promise<any>;
+  signAndSendTransaction?: (tx: Transaction) => Promise<{ signature: string }>;
+  signTransaction?: (tx: Transaction) => Promise<Transaction>;
+}
+
+interface WindowWithPhantom extends Window {
+  phantom?: { solana?: PhantomProvider };
+  solana?: PhantomProvider;
 }
 
 export function getPhantomProvider(): PhantomProvider | null {
   if (typeof window === "undefined") return null;
-  const provider = (window as any).phantom?.solana ?? (window as any).solana;
-  if (provider?.isPhantom) return provider as PhantomProvider;
+  const w = window as WindowWithPhantom;
+  const provider = w.phantom?.solana ?? w.solana;
+  if (provider?.isPhantom) return provider;
   return null;
 }
 

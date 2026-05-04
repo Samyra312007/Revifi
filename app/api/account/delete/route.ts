@@ -46,11 +46,10 @@ export async function POST() {
     await supabase.auth.signOut();
 
     return NextResponse.json({ success: true });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Delete account error:", error);
-    return NextResponse.json(
-      { error: error?.message || "Internal server error" },
-      { status: 500 },
-    );
+    const message =
+      error instanceof Error ? error.message : "Internal server error";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

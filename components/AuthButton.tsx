@@ -3,10 +3,27 @@
 import { createClient } from "@/lib/supabase/client";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import type { User } from "@supabase/supabase-js";
+
+interface UserProfileRow {
+  user_type?: string | null;
+}
+
+function initialsFor(user: User | null): string {
+  if (!user) return "?";
+  const name =
+    (user.user_metadata?.full_name as string | undefined) ||
+    user.email ||
+    "";
+  if (!name) return "?";
+  const parts = name.split(/[\s@.]+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  return (parts[0][0] + (parts[1]?.[0] ?? "")).toUpperCase();
+}
 
 export default function AuthButton() {
-  const [user, setUser] = useState<any>(null);
-  const [userProfile, setUserProfile] = useState<any>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [userProfile, setUserProfile] = useState<UserProfileRow | null>(null);
   const router = useRouter();
   const supabase = createClient();
 
@@ -23,7 +40,7 @@ export default function AuthButton() {
           .select("*")
           .eq("id", user.id)
           .single();
-        setUserProfile(profile);
+        setUserProfile((profile as UserProfileRow) ?? null);
       }
     };
     getUser();
@@ -53,16 +70,22 @@ export default function AuthButton() {
   };
 
   if (user) {
+    const avatarUrl = user.user_metadata?.avatar_url as string | undefined;
+
     return (
       <div className="px-6 mt-6 flex items-center gap-3">
-        <img
-          alt="Creator Profile"
-          className="w-8 h-8 rounded-full border border-purple-500/30"
-          src={
-            user.user_metadata?.avatar_url ||
-            "https://lh3.googleusercontent.com/aida-public/AB6AXuBniduSkFuNtTPhbh8s0f9NDOMNFQwuFPdYofe6JSM3N_yNnm5UYTUR78sTIrELHeevXppWRLtub3AOxfZWitYv9VdjLMvGF3MHdJHoLE2_-pzac27mX1hUUhGlR0oeAv-xgleMikb-lIkkyCJmVAuo9Hw-PltYlZSs3H2Vl-oBmxbYKvxTkfIMIrfydnstxjH6GwW62Op7voDex6eq7iFZTQi0NuYp6ImWiTQJwRJe1I4JjGkdCGSMx1lWjM5bZfvxE1F14TYqEZ0F"
-          }
-        />
+        {avatarUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            alt={user.user_metadata?.full_name || "Profile"}
+            className="w-8 h-8 rounded-full border border-purple-500/30 object-cover"
+            src={avatarUrl}
+          />
+        ) : (
+          <div className="w-8 h-8 rounded-full border border-purple-500/30 bg-purple-500/20 text-purple-200 flex items-center justify-center text-xs font-bold">
+            {initialsFor(user)}
+          </div>
+        )}
         <div className="overflow-hidden">
           <p className="text-sm font-bold text-on-surface truncate">
             {user.user_metadata?.full_name || user.email?.split("@")[0]}

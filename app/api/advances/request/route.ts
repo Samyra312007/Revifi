@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { transferUsdcFromTreasury } from "@/lib/solana";
+import { transferUsdcFromTreasury } from "@/lib/solana/server";
 
 export async function POST(req: Request) {
   try {
@@ -25,7 +25,7 @@ export async function POST(req: Request) {
 
     const { data: invoice, error: invoiceError } = await supabase
       .from("invoices")
-      .select("*, creators(*)")
+      .select("*, creators(user_id)")
       .eq("id", invoice_id)
       .single();
 
@@ -46,7 +46,16 @@ export async function POST(req: Request) {
     const fee = Number(advance_amount) * 0.05;
     const finalAmount = Number(advance_amount) - fee;
 
-    const creatorWallet = invoice.creators?.solana_wallet;
+    const ownerId =
+      (invoice.creators as { user_id?: string } | null)?.user_id ?? user.id;
+
+    const { data: ownerProfile } = await supabase
+      .from("users")
+      .select("solana_wallet")
+      .eq("id", ownerId)
+      .single();
+
+    const creatorWallet = ownerProfile?.solana_wallet;
     if (!creatorWallet) {
       return NextResponse.json(
         {

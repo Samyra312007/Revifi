@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-import { getSolBalance, getUSDCBalance } from "@/lib/solana";
+import { getSolBalance, getUSDCBalance, fetchSolPriceUsd } from "@/lib/solana/client";
 import AuthButton from "@/components/AuthButton";
 import NotificationBell from "@/components/NotificationBell";
 import PhantomConnect from "@/components/PhantomConnect";
@@ -41,8 +42,6 @@ interface WalletData {
   recentActivity: ActivityItem[];
 }
 
-const SOL_PRICE_USD = 110;
-
 const DEFAULT_WALLET: WalletData = {
   walletAddress: null,
   totalBalance: 0,
@@ -66,53 +65,9 @@ export default function WalletPage() {
   const [withdrawDest, setWithdrawDest] = useState("");
   const [withdrawAsset, setWithdrawAsset] = useState<"SOL" | "USDC">("USDC");
   const [withdrawing, setWithdrawing] = useState(false);
+  const [solPriceUsd, setSolPriceUsd] = useState<number>(0);
   const supabase = createClient();
-
-  useEffect(() => {
-    let txChannel: ReturnType<typeof supabase.channel> | null = null;
-    let userChannel: ReturnType<typeof supabase.channel> | null = null;
-    fetchWalletData();
-
-    (async () => {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!user) return;
-
-      txChannel = supabase
-        .channel(`wallet_tx_${user.id}`)
-        .on(
-          "postgres_changes",
-          {
-            event: "*",
-            schema: "public",
-            table: "transactions",
-            filter: `user_id=eq.${user.id}`,
-          },
-          () => fetchWalletData(),
-        )
-        .subscribe();
-
-      userChannel = supabase
-        .channel(`wallet_user_${user.id}`)
-        .on(
-          "postgres_changes",
-          {
-            event: "UPDATE",
-            schema: "public",
-            table: "users",
-            filter: `id=eq.${user.id}`,
-          },
-          () => fetchWalletData(),
-        )
-        .subscribe();
-    })();
-
-    return () => {
-      if (txChannel) supabase.removeChannel(txChannel);
-      if (userChannel) supabase.removeChannel(userChannel);
-    };
-  }, []);
+  const router = useRouter();
 
   function exportActivityCsv() {
     const rows = walletData.recentActivity.map((a) => ({
@@ -128,16 +83,14 @@ export default function WalletPage() {
     downloadCsv(rows, `revifi-wallet-${Date.now()}.csv`);
   }
 
-  async function fetchWalletData() {
+  const fetchWalletData = useCallback(async () => {
     setLoading(true);
     const {
       data: { user },
     } = await supabase.auth.getUser();
 
     if (!user) {
-      setAuthed(false);
-      setWalletData(DEFAULT_WALLET);
-      setLoading(false);
+      router.push("/?signin=1");
       return;
     }
     setAuthed(true);
@@ -164,7 +117,12 @@ export default function WalletPage() {
       }
     }
 
-    const solValue = solBalance * SOL_PRICE_USD;
+    let livePrice = solPriceUsd;
+    if (!livePrice) {
+      livePrice = await fetchSolPriceUsd();
+      if (livePrice) setSolPriceUsd(livePrice);
+    }
+    const solValue = solBalance * (livePrice || 0);
     const totalBalance = solValue + usdcBalance;
     const allocSol = totalBalance > 0 ? (solValue / totalBalance) * 100 : 0;
     const allocUsdc = totalBalance > 0 ? (usdcBalance / totalBalance) * 100 : 0;
@@ -176,7 +134,17 @@ export default function WalletPage() {
       .order("created_at", { ascending: false })
       .limit(10);
 
-    const recentActivity: ActivityItem[] = (transactions || []).map((t) => {
+    type WalletTxRow = {
+      id: string;
+      type: string;
+      amount: number;
+      status: string;
+      created_at: string;
+      metadata?: { description?: string } | null;
+    };
+    const recentActivity: ActivityItem[] = (
+      (transactions as WalletTxRow[]) || []
+    ).map((t) => {
       const isPayment = t.type === "payment";
       const isAdvance = t.type === "advance";
       const isWithdrawal = t.type === "withdrawal";
@@ -226,7 +194,53 @@ export default function WalletPage() {
       recentActivity,
     });
     setLoading(false);
-  }
+  }, [supabase, router, solPriceUsd]);
+
+  useEffect(() => {
+    let txChannel: ReturnType<typeof supabase.channel> | null = null;
+    let userChannel: ReturnType<typeof supabase.channel> | null = null;
+
+    (async () => {
+      await fetchWalletData();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+
+      txChannel = supabase
+        .channel(`wallet_tx_${user.id}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "transactions",
+            filter: `user_id=eq.${user.id}`,
+          },
+          () => fetchWalletData(),
+        )
+        .subscribe();
+
+      userChannel = supabase
+        .channel(`wallet_user_${user.id}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "UPDATE",
+            schema: "public",
+            table: "users",
+            filter: `id=eq.${user.id}`,
+          },
+          () => fetchWalletData(),
+        )
+        .subscribe();
+    })();
+
+    return () => {
+      if (txChannel) supabase.removeChannel(txChannel);
+      if (userChannel) supabase.removeChannel(userChannel);
+    };
+  }, [fetchWalletData, supabase]);
 
   async function submitWithdraw() {
     const amount = Number(withdrawAmount);
@@ -243,10 +257,17 @@ export default function WalletPage() {
     try {
       let signature: string | undefined;
 
+      let solAmount: number | undefined;
       if (selectedMethod === "crypto" && walletData.walletAddress) {
         try {
           if (withdrawAsset === "SOL") {
-            const solAmount = amount / SOL_PRICE_USD;
+            const price = solPriceUsd || (await fetchSolPriceUsd());
+            if (!price) {
+              throw new Error(
+                "Could not fetch live SOL price. Try again or switch to USDC.",
+              );
+            }
+            solAmount = amount / price;
             signature = await sendSolWithPhantom(
               withdrawDest.trim(),
               solAmount,
@@ -260,10 +281,11 @@ export default function WalletPage() {
               USDC_MINT_ADDRESS,
             );
           }
-        } catch (err: any) {
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
           if (
             !confirm(
-              `Phantom signing failed: ${err?.message || err}. Submit withdrawal request anyway?`,
+              `Phantom signing failed: ${message}. Submit withdrawal request anyway?`,
             )
           ) {
             setWithdrawing(false);
@@ -281,6 +303,7 @@ export default function WalletPage() {
           amount,
           destination: selectedMethod === "crypto" ? withdrawDest.trim() : null,
           signature,
+          sol_amount: withdrawAsset === "SOL" ? solAmount : undefined,
         }),
       });
       const result = await res.json();
@@ -297,8 +320,9 @@ export default function WalletPage() {
       } else {
         alert("Failed: " + (result.error || "Unknown error"));
       }
-    } catch (err: any) {
-      alert("Withdrawal failed: " + (err?.message || err));
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      alert("Withdrawal failed: " + message);
     } finally {
       setWithdrawing(false);
     }
@@ -337,7 +361,13 @@ export default function WalletPage() {
     return colors[type] || "text-white";
   };
 
-  const chartData = [40, 55, 45, 70, 60, 85, 75, 90, 65, 80, 95, 88];
+  const chartData = (() => {
+    const recent = walletData.recentActivity.slice(0, 12).reverse();
+    if (recent.length === 0) return [10, 12, 9, 14, 11, 16, 13, 18, 15, 20, 17, 22];
+    const amounts = recent.map((a) => Math.abs(Number(a.amount) || 0));
+    const max = Math.max(...amounts, 1);
+    return amounts.map((a) => Math.max(8, Math.round((a / max) * 95)));
+  })();
 
   if (loading) {
     return (
@@ -616,17 +646,6 @@ export default function WalletPage() {
                 <h3 className="text-headline-md font-headline-md text-white">
                   Asset Allocation
                 </h3>
-                <div className="flex gap-2 bg-surface-container p-1 rounded-lg">
-                  <button className="px-3 py-1 text-xs font-bold rounded bg-slate-800 text-white">
-                    All
-                  </button>
-                  <button className="px-3 py-1 text-xs font-bold rounded text-slate-500 hover:text-slate-300">
-                    1M
-                  </button>
-                  <button className="px-3 py-1 text-xs font-bold rounded text-slate-500 hover:text-slate-300">
-                    1W
-                  </button>
-                </div>
               </div>
 
               <div className="flex-1 flex flex-col justify-center gap-8">
@@ -797,11 +816,6 @@ export default function WalletPage() {
             </table>
           </div>
 
-          <div className="p-6 bg-surface-container/30 text-center">
-            <button className="text-xs font-bold text-slate-500 uppercase tracking-widest hover:text-white transition-colors">
-              View All Transaction History
-            </button>
-          </div>
         </section>
       </main>
 
@@ -1015,6 +1029,7 @@ export default function WalletPage() {
                       Solana (SPL) Network · SOL or USDC
                     </p>
                     <div className="bg-white p-2 rounded-lg w-fit mx-auto">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img
                         alt="Deposit QR"
                         width={160}

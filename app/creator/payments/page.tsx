@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import AuthButton from "@/components/AuthButton";
 import NotificationBell from "@/components/NotificationBell";
@@ -68,10 +69,12 @@ const DEFAULT_DATA: PaymentsData = {
 export default function PaymentsPage() {
   const [showAdvanceModal, setShowAdvanceModal] = useState(false);
   const [showConnectModal, setShowConnectModal] = useState(false);
-  const [selectedPlatform, setSelectedPlatform] = useState<string | null>(null);
+  const [, setSelectedPlatform] = useState<string | null>(null);
   const [paymentsData, setPaymentsData] = useState<PaymentsData>(DEFAULT_DATA);
   const [loading, setLoading] = useState(true);
   const [authed, setAuthed] = useState(false);
+  const [activityFilter, setActivityFilter] =
+    useState<"all" | "payment" | "advance">("all");
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<string>("");
   const [advanceAmountInput, setAdvanceAmountInput] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
@@ -83,47 +86,7 @@ export default function PaymentsPage() {
     monthly_revenue: "",
   });
   const supabase = createClient();
-
-  useEffect(() => {
-    let invoiceChannel: ReturnType<typeof supabase.channel> | null = null;
-    let txChannel: ReturnType<typeof supabase.channel> | null = null;
-    fetchPaymentsData();
-
-    (async () => {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!user) return;
-
-      invoiceChannel = supabase
-        .channel("payments_invoices_changes")
-        .on(
-          "postgres_changes",
-          { event: "*", schema: "public", table: "invoices" },
-          () => fetchPaymentsData(),
-        )
-        .subscribe();
-
-      txChannel = supabase
-        .channel(`payments_tx_${user.id}`)
-        .on(
-          "postgres_changes",
-          {
-            event: "*",
-            schema: "public",
-            table: "transactions",
-            filter: `user_id=eq.${user.id}`,
-          },
-          () => fetchPaymentsData(),
-        )
-        .subscribe();
-    })();
-
-    return () => {
-      if (invoiceChannel) supabase.removeChannel(invoiceChannel);
-      if (txChannel) supabase.removeChannel(txChannel);
-    };
-  }, []);
+  const router = useRouter();
 
   function exportActivityCsv() {
     const rows = paymentsData.recentActivity.map((a) => ({
@@ -138,16 +101,14 @@ export default function PaymentsPage() {
     downloadCsv(rows, `revifi-payments-${Date.now()}.csv`);
   }
 
-  async function fetchPaymentsData() {
+  const fetchPaymentsData = useCallback(async () => {
     setLoading(true);
     const {
       data: { user },
     } = await supabase.auth.getUser();
 
     if (!user) {
-      setAuthed(false);
-      setPaymentsData(DEFAULT_DATA);
-      setLoading(false);
+      router.push("/?signin=1");
       return;
     }
     setAuthed(true);
@@ -195,8 +156,15 @@ export default function PaymentsPage() {
       .select("platform, handle, advance_limit")
       .eq("user_id", user.id);
 
+    type PlatformRow = {
+      platform: string;
+      handle?: string | null;
+      advance_limit?: number | null;
+    };
     const platforms: PlatformItem[] = DEFAULT_PLATFORMS.map((p) => {
-      const found = platformRows?.find((row: any) => row.platform === p.key);
+      const found = (platformRows as PlatformRow[] | null)?.find(
+        (row) => row.platform === p.key,
+      );
       return found
         ? {
             ...p,
@@ -216,6 +184,8 @@ export default function PaymentsPage() {
 
     const now = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const startOfPrevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
     const totalPaidMTD =
       transactions
         ?.filter(
@@ -225,8 +195,34 @@ export default function PaymentsPage() {
             new Date(t.created_at) >= startOfMonth,
         )
         .reduce((sum, t) => sum + Number(t.amount || 0), 0) || 0;
+    const totalPaidPrev =
+      transactions
+        ?.filter(
+          (t) =>
+            t.type === "payment" &&
+            t.status === "completed" &&
+            new Date(t.created_at) >= startOfPrevMonth &&
+            new Date(t.created_at) < startOfThisMonth,
+        )
+        .reduce((sum, t) => sum + Number(t.amount || 0), 0) || 0;
+    const monthlyGrowth =
+      totalPaidPrev > 0
+        ? Math.round(((totalPaidMTD - totalPaidPrev) / totalPaidPrev) * 1000) /
+          10
+        : 0;
 
-    const recentActivity: ActivityItem[] = (transactions || []).map((t: any) => {
+    type TxRow = {
+      id: string;
+      type: string;
+      amount: number;
+      status: string;
+      created_at: string;
+      metadata?: { description?: string } | null;
+      invoice?: { deal_name?: string } | { deal_name?: string }[] | null;
+    };
+    const recentActivity: ActivityItem[] = (
+      (transactions as TxRow[]) || []
+    ).map((t) => {
       const dealName: string | undefined = Array.isArray(t.invoice)
         ? t.invoice?.[0]?.deal_name
         : t.invoice?.deal_name;
@@ -268,7 +264,7 @@ export default function PaymentsPage() {
             )
           : 0,
       totalPaidMTD,
-      monthlyGrowth: 12.4,
+      monthlyGrowth,
       recentActivity,
       advanceableInvoices,
       platforms,
@@ -276,7 +272,55 @@ export default function PaymentsPage() {
     });
 
     setLoading(false);
-  }
+  }, [supabase, router]);
+
+  useEffect(() => {
+    let invoiceChannel: ReturnType<typeof supabase.channel> | null = null;
+    let txChannel: ReturnType<typeof supabase.channel> | null = null;
+
+    (async () => {
+      await fetchPaymentsData();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+
+      invoiceChannel = supabase
+        .channel(`payments_invoices_changes_${user.id}`)
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "invoices" },
+          () => fetchPaymentsData(),
+        )
+        .subscribe();
+
+      txChannel = supabase
+        .channel(`payments_tx_${user.id}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "transactions",
+            filter: `user_id=eq.${user.id}`,
+          },
+          () => fetchPaymentsData(),
+        )
+        .subscribe();
+    })();
+
+    return () => {
+      if (invoiceChannel) supabase.removeChannel(invoiceChannel);
+      if (txChannel) supabase.removeChannel(txChannel);
+    };
+  }, [fetchPaymentsData, supabase]);
+
+  const filteredActivity = useMemo(() => {
+    if (activityFilter === "all") return paymentsData.recentActivity;
+    return paymentsData.recentActivity.filter(
+      (a) => a.type === activityFilter,
+    );
+  }, [paymentsData.recentActivity, activityFilter]);
 
   async function connectPlatform() {
     if (!connectForm.handle.trim()) {
@@ -314,8 +358,9 @@ export default function PaymentsPage() {
       } else {
         alert("Failed: " + (result.error || "Unknown error"));
       }
-    } catch (err: any) {
-      alert("Connection failed: " + (err?.message || err));
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      alert("Connection failed: " + message);
     } finally {
       setConnecting(null);
     }
@@ -334,8 +379,9 @@ export default function PaymentsPage() {
       } else {
         alert("Failed: " + (result.error || "Unknown error"));
       }
-    } catch (err: any) {
-      alert("Disconnect failed: " + (err?.message || err));
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      alert("Disconnect failed: " + message);
     }
   }
 
@@ -614,15 +660,23 @@ export default function PaymentsPage() {
               <div className="flex items-center justify-between">
                 <h2 className="font-headline-md text-white">Recent Activity</h2>
                 <div className="flex p-1 bg-surface-container rounded-lg border border-white/5">
-                  <button className="px-4 py-1.5 text-xs font-bold rounded-md bg-white/10 text-white shadow-sm">
-                    All
-                  </button>
-                  <button className="px-4 py-1.5 text-xs font-bold text-slate-500 hover:text-white transition-colors">
-                    Payments
-                  </button>
-                  <button className="px-4 py-1.5 text-xs font-bold text-slate-500 hover:text-white transition-colors">
-                    Advances
-                  </button>
+                  {(["all", "payment", "advance"] as const).map((key) => (
+                    <button
+                      key={key}
+                      onClick={() => setActivityFilter(key)}
+                      className={`px-4 py-1.5 text-xs font-bold rounded-md transition-colors ${
+                        activityFilter === key
+                          ? "bg-white/10 text-white shadow-sm"
+                          : "text-slate-500 hover:text-white"
+                      }`}
+                    >
+                      {key === "all"
+                        ? "All"
+                        : key === "payment"
+                          ? "Payments"
+                          : "Advances"}
+                    </button>
+                  ))}
                 </div>
               </div>
 
@@ -645,14 +699,14 @@ export default function PaymentsPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/5">
-                    {paymentsData.recentActivity.length === 0 ? (
+                    {filteredActivity.length === 0 ? (
                       <tr>
                         <td colSpan={4} className="text-center text-slate-500 py-12">
                           No recent activity yet
                         </td>
                       </tr>
                     ) : (
-                      paymentsData.recentActivity.map((activity) => (
+                      filteredActivity.map((activity) => (
                         <tr
                           key={activity.id}
                           className="hover:bg-white/5 transition-colors group"

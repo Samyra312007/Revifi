@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import AuthButton from "@/components/AuthButton";
 import NotificationBell from "@/components/NotificationBell";
@@ -94,45 +95,23 @@ export default function DealsPage() {
     deal_name: "",
     brand_id: "",
     new_brand_name: "",
+    new_brand_industry: "",
+    new_brand_contact_email: "",
     amount: "",
     due_date: "",
   });
   const [submitting, setSubmitting] = useState(false);
 
   const supabase = createClient();
+  const router = useRouter();
 
-  useEffect(() => {
-    let channel: ReturnType<typeof supabase.channel> | null = null;
-    (async () => {
-      await fetchData();
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!user) return;
-
-      channel = supabase
-        .channel("deals_invoices_changes")
-        .on(
-          "postgres_changes",
-          { event: "*", schema: "public", table: "invoices" },
-          () => fetchData(),
-        )
-        .subscribe();
-    })();
-    return () => {
-      if (channel) supabase.removeChannel(channel);
-    };
-  }, []);
-
-  async function fetchData() {
+  const fetchData = useCallback(async () => {
     setLoading(true);
     const {
       data: { user },
     } = await supabase.auth.getUser();
     if (!user) {
-      setAuthed(false);
-      setDeals([]);
-      setLoading(false);
+      router.push("/?signin=1");
       return;
     }
     setAuthed(true);
@@ -162,7 +141,16 @@ export default function DealsPage() {
       .eq("creator_id", creator.id)
       .order("created_at", { ascending: false });
 
-    const mapped: Deal[] = (invoices || []).map((inv: any) => {
+    type InvoiceRow = {
+      id: string;
+      deal_name: string;
+      amount: number;
+      due_date: string | null;
+      status: string;
+      brands?: { company_name?: string } | { company_name?: string }[] | null;
+    };
+
+    const mapped: Deal[] = ((invoices as InvoiceRow[]) || []).map((inv) => {
       const display = statusToDisplay(inv.status);
       const brandName = Array.isArray(inv.brands)
         ? inv.brands?.[0]?.company_name
@@ -188,7 +176,30 @@ export default function DealsPage() {
 
     setDeals(mapped);
     setLoading(false);
-  }
+  }, [supabase, router]);
+
+  useEffect(() => {
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+    (async () => {
+      await fetchData();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+
+      channel = supabase
+        .channel(`deals_invoices_changes_${user.id}`)
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "invoices" },
+          () => fetchData(),
+        )
+        .subscribe();
+    })();
+    return () => {
+      if (channel) supabase.removeChannel(channel);
+    };
+  }, [fetchData, supabase]);
 
   const filteredDeals = useMemo(() => {
     if (filterStatus === "all") return deals;
@@ -231,9 +242,17 @@ export default function DealsPage() {
 
     let brandId = form.brand_id;
     if (!brandId && form.new_brand_name.trim()) {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
       const { data: newBrand, error: brandErr } = await supabase
         .from("brands")
-        .insert({ company_name: form.new_brand_name.trim() })
+        .insert({
+          company_name: form.new_brand_name.trim(),
+          industry: form.new_brand_industry.trim() || null,
+          contact_email: form.new_brand_contact_email.trim() || null,
+          user_id: user?.id || null,
+        })
         .select()
         .single();
       if (brandErr) {
@@ -277,6 +296,8 @@ export default function DealsPage() {
           deal_name: "",
           brand_id: "",
           new_brand_name: "",
+          new_brand_industry: "",
+          new_brand_contact_email: "",
           amount: "",
           due_date: "",
         });
@@ -386,9 +407,6 @@ export default function DealsPage() {
 
         <div className="flex items-center gap-4">
           <NotificationBell />
-          <button className="hover:bg-white/5 rounded-full p-2 transition-all text-slate-400">
-            <span className="material-symbols-outlined">history</span>
-          </button>
           <button
             onClick={() => setShowCreateModal(true)}
             className="bg-primary-container text-on-primary-container font-semibold px-4 py-2 rounded-lg text-sm transition-all shadow-lg shadow-purple-500/20 active:scale-95"
@@ -571,16 +589,6 @@ export default function DealsPage() {
                     </div>
                   </div>
 
-                  <div className="mt-6 flex gap-3">
-                    <button className="flex-1 py-2 bg-surface-container-highest border border-white/5 rounded-lg text-xs font-medium hover:bg-white/10 transition-colors">
-                      View Contract
-                    </button>
-                    <button className="w-10 h-10 bg-surface-container-highest border border-white/5 rounded-lg flex items-center justify-center hover:text-primary transition-colors">
-                      <span className="material-symbols-outlined text-lg">
-                        more_horiz
-                      </span>
-                    </button>
-                  </div>
                 </div>
               ))}
 
@@ -743,6 +751,34 @@ export default function DealsPage() {
                   placeholder="New brand name"
                   className="mt-2 w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary"
                 />
+                {form.new_brand_name.trim() && (
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    <input
+                      type="text"
+                      value={form.new_brand_industry}
+                      onChange={(e) =>
+                        setForm({
+                          ...form,
+                          new_brand_industry: e.target.value,
+                        })
+                      }
+                      placeholder="Industry (optional)"
+                      className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                    />
+                    <input
+                      type="email"
+                      value={form.new_brand_contact_email}
+                      onChange={(e) =>
+                        setForm({
+                          ...form,
+                          new_brand_contact_email: e.target.value,
+                        })
+                      }
+                      placeholder="Brand contact email"
+                      className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                    />
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-4">

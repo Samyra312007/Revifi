@@ -3,14 +3,28 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
+import { isValidSolanaAddress } from "@/lib/solana/client";
 import { useRouter } from "next/navigation";
+import type { User } from "@supabase/supabase-js";
 import AuthButton from "@/components/AuthButton";
 import NotificationBell from "@/components/NotificationBell";
 import PhantomConnect from "@/components/PhantomConnect";
 
+interface UserRow {
+  id: string;
+  email?: string;
+  solana_wallet?: string | null;
+  user_type?: string;
+  metadata?: {
+    email_notifications?: boolean;
+    push_notifications?: boolean;
+    [key: string]: unknown;
+  } | null;
+}
+
 export default function SettingsPage() {
-  const [user, setUser] = useState<any>(null);
-  const [profile, setProfile] = useState<any>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [profile, setProfile] = useState<UserRow | null>(null);
   const [solanaWallet, setSolanaWallet] = useState("");
   const [emailNotifications, setEmailNotifications] = useState(true);
   const [pushNotifications, setPushNotifications] = useState(false);
@@ -18,10 +32,6 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const supabase = createClient();
   const router = useRouter();
-
-  useEffect(() => {
-    fetchProfile();
-  }, []);
 
   async function fetchProfile() {
     const {
@@ -39,7 +49,7 @@ export default function SettingsPage() {
       .eq("id", user.id)
       .single();
 
-    setProfile(profile);
+    setProfile((profile as UserRow) ?? null);
     setSolanaWallet(profile?.solana_wallet || "");
     if (profile?.metadata?.email_notifications !== undefined) {
       setEmailNotifications(Boolean(profile.metadata.email_notifications));
@@ -51,11 +61,18 @@ export default function SettingsPage() {
   }
 
   async function updateProfile() {
+    if (!user) return;
+    if (solanaWallet && !isValidSolanaAddress(solanaWallet.trim())) {
+      alert(
+        "That doesn't look like a valid Solana wallet address. Double-check it before saving.",
+      );
+      return;
+    }
     setSaving(true);
     const { error } = await supabase
       .from("users")
       .update({
-        solana_wallet: solanaWallet || null,
+        solana_wallet: solanaWallet ? solanaWallet.trim() : null,
         metadata: {
           ...(profile?.metadata || {}),
           email_notifications: emailNotifications,
@@ -72,6 +89,18 @@ export default function SettingsPage() {
     }
     setSaving(false);
   }
+
+  useEffect(() => {
+    let cancelled = false;
+    const t = setTimeout(() => {
+      if (!cancelled) void fetchProfile();
+    }, 0);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function deleteAccount() {
     const confirmed = confirm(
@@ -94,8 +123,9 @@ export default function SettingsPage() {
       } else {
         alert("Failed to delete account: " + (result.error || "Unknown error"));
       }
-    } catch (err: any) {
-      alert("Failed to delete account: " + (err?.message || err));
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      alert("Failed to delete account: " + message);
     }
   }
 

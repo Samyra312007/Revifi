@@ -11,7 +11,7 @@ interface Notification {
   type: string;
   read: boolean;
   created_at: string;
-  metadata?: any;
+  metadata?: Record<string, unknown> | null;
 }
 
 export default function NotificationBell() {
@@ -51,6 +51,7 @@ export default function NotificationBell() {
     return () => {
       if (channel) supabase.removeChannel(channel);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {

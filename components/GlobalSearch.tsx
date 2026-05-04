@@ -25,26 +25,30 @@ export default function GlobalSearch({
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (!query.trim()) {
-      setResults([]);
-      return;
-    }
-    setLoading(true);
+    const trimmed = query.trim();
+    if (!trimmed) return;
+    let cancelled = false;
     const timer = setTimeout(async () => {
+      if (cancelled) return;
+      setLoading(true);
       try {
         const res = await fetch(
-          `/api/search?q=${encodeURIComponent(query.trim())}`,
+          `/api/search?q=${encodeURIComponent(trimmed)}`,
         );
         const data = await res.json();
+        if (cancelled) return;
         setResults(data.results || []);
         setOpen(true);
       } catch (err) {
         console.error("Search error:", err);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     }, 250);
-    return () => clearTimeout(timer);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [query]);
 
   useEffect(() => {

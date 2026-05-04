@@ -1,8 +1,69 @@
 "use client";
 
 import Link from "next/link";
+import { Suspense, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { createClient } from "@/lib/supabase/client";
 
-export default function Home() {
+function HomeContent() {
+  const [authed, setAuthed] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
+  const search = useSearchParams();
+  const error = search?.get("error");
+  const wantsSignIn = search?.get("signin") === "1";
+  const supabase = createClient();
+
+  useEffect(() => {
+    let cancelled = false;
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      if (!cancelled) setAuthed(Boolean(user));
+    });
+    const { data } = supabase.auth.onAuthStateChange((_e, session) => {
+      setAuthed(Boolean(session?.user));
+    });
+    return () => {
+      cancelled = true;
+      data.subscription.unsubscribe();
+    };
+  }, [supabase]);
+
+  async function handleSignIn() {
+    setSigningIn(true);
+    try {
+      await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: { redirectTo: `${window.location.origin}/api/auth/callback` },
+      });
+    } finally {
+      setSigningIn(false);
+    }
+  }
+
+  useEffect(() => {
+    if (wantsSignIn && !authed && !signingIn) {
+      const t = setTimeout(() => {
+        void handleSignIn();
+      }, 0);
+      return () => clearTimeout(t);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wantsSignIn, authed, signingIn]);
+
+  function ctaButton(label: string, className: string) {
+    if (authed) {
+      return (
+        <Link href="/creator/dashboard">
+          <button className={className}>{label}</button>
+        </Link>
+      );
+    }
+    return (
+      <button onClick={handleSignIn} disabled={signingIn} className={className}>
+        {signingIn ? "Opening Google…" : label}
+      </button>
+    );
+  }
+
   return (
     <>
       <header className="fixed top-0 w-full z-50 border-b border-white/10 bg-slate-950/80 backdrop-blur-md shadow-[0_8px_32px_0_rgba(153,69,255,0.05)]">
@@ -17,39 +78,38 @@ export default function Home() {
           </div>
           <div className="hidden md:flex items-center gap-8">
             <a
-              href="#"
+              href="#top"
               className="text-white font-semibold hover:text-primary-container transition-colors"
             >
               Home
             </a>
             <a
-              href="#"
+              href="#solutions"
               className="text-slate-400 hover:text-primary-container transition-colors"
             >
               Solutions
             </a>
             <a
-              href="#"
+              href="#security"
               className="text-slate-400 hover:text-primary-container transition-colors"
             >
               Security
             </a>
-            <a
-              href="#"
-              className="text-slate-400 hover:text-primary-container transition-colors"
-            >
-              Developers
-            </a>
           </div>
-          <Link href="/creator/dashboard">
-            <button className="bg-primary-container text-on-primary-container px-6 py-2 rounded-full font-semibold active:scale-95 transition-transform hover:opacity-90">
-              Get Started
-            </button>
-          </Link>
+          {ctaButton(
+            authed ? "Open Dashboard" : "Get Started",
+            "bg-primary-container text-on-primary-container px-6 py-2 rounded-full font-semibold active:scale-95 transition-transform hover:opacity-90",
+          )}
         </nav>
       </header>
 
-      <main className="pt-24 mesh-gradient">
+      {error === "auth_failed" && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 bg-red-500/15 border border-red-500/30 text-red-300 text-sm px-4 py-2 rounded-lg">
+          Sign in failed. Make sure Google OAuth is enabled in Supabase.
+        </div>
+      )}
+
+      <main id="top" className="pt-24 mesh-gradient">
         <section className="max-w-7xl mx-auto px-6 py-24 md:py-32 grid grid-cols-1 lg:grid-cols-2 gap-12 items-center">
           <div className="space-y-8">
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-primary-container/10 border border-primary-container/20 text-primary-container">
@@ -68,37 +128,19 @@ export default function Home() {
             </h1>
             <p className="font-body-lg text-body-lg text-on-surface-variant max-w-lg">
               Bridge the gap between work and wealth. Access instant liquidity
-              from pending contracts with Revifi's institutional-grade
+              from pending contracts with Revifi&apos;s institutional-grade
               decentralized infrastructure.
             </p>
             <div className="flex flex-wrap gap-4 pt-4">
-              <Link href="/creator/dashboard">
-                <button className="px-8 py-4 bg-primary-container text-white rounded-xl font-headline-md text-body-md hover:bg-primary-container/90 transition-all shadow-[0_0_30px_rgba(153,69,255,0.3)]">
-                  Apply for Advance
+              {ctaButton(
+                "Apply for Advance",
+                "px-8 py-4 bg-primary-container text-white rounded-xl font-headline-md text-body-md hover:bg-primary-container/90 transition-all shadow-[0_0_30px_rgba(153,69,255,0.3)]",
+              )}
+              <a href="#solutions">
+                <button className="px-8 py-4 border border-outline/30 text-white rounded-xl font-headline-md text-body-md hover:bg-white/5 transition-all">
+                  See How It Works
                 </button>
-              </Link>
-              <button className="px-8 py-4 border border-outline/30 text-white rounded-xl font-headline-md text-body-md hover:bg-white/5 transition-all">
-                View Demo
-              </button>
-            </div>
-            <div className="flex items-center gap-6 pt-8 border-t border-white/5">
-              <div className="flex flex-col">
-                <span className="font-display-xl text-headline-lg text-white">
-                  $42M+
-                </span>
-                <span className="font-label-sm text-label-sm text-slate-500 uppercase">
-                  Paid Out
-                </span>
-              </div>
-              <div className="w-px h-10 bg-white/10"></div>
-              <div className="flex flex-col">
-                <span className="font-display-xl text-headline-lg text-white">
-                  0.0s
-                </span>
-                <span className="font-label-sm text-label-sm text-slate-500 uppercase">
-                  Settlement Time
-                </span>
-              </div>
+              </a>
             </div>
           </div>
 
@@ -108,7 +150,7 @@ export default function Home() {
               <div className="flex justify-between items-start mb-12">
                 <div>
                   <p className="font-label-sm text-label-sm text-slate-400 mb-1">
-                    Available Liquidity
+                    Available Liquidity (illustrative)
                   </p>
                   <h3 className="font-display-xl text-headline-lg text-white">
                     $124,500.00
@@ -136,7 +178,7 @@ export default function Home() {
                   <div className="p-4 bg-white/5 rounded-xl border border-white/5">
                     <p className="text-label-sm text-slate-500 mb-1">Fee</p>
                     <p className="text-body-md text-white font-data-mono">
-                      1.2% Fixed
+                      5% Fixed
                     </p>
                   </div>
                   <div className="p-4 bg-white/5 rounded-xl border border-white/5">
@@ -151,7 +193,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="max-w-7xl mx-auto px-6 py-24">
+        <section id="solutions" className="max-w-7xl mx-auto px-6 py-24">
           <div className="text-center mb-16 space-y-4">
             <h2 className="font-display-xl text-headline-lg text-white">
               Engineered for Velocity
@@ -204,18 +246,18 @@ export default function Home() {
                   Multi-currency Wallet
                 </h3>
                 <p className="text-on-surface-variant text-body-md">
-                  Manage USD, EUR, and digital assets in one unified treasury
+                  Manage USD and digital assets in one unified treasury
                   interface with instant conversion.
                 </p>
               </div>
               <div className="mt-8 pt-8 border-t border-white/5">
                 <div className="flex justify-between items-center text-sm text-slate-500 font-data-mono">
-                  <span>USD</span>
-                  <span className="text-white">$45,000</span>
+                  <span>USDC</span>
+                  <span className="text-white">Stablecoin</span>
                 </div>
                 <div className="flex justify-between items-center text-sm text-slate-500 font-data-mono mt-2">
                   <span>SOL</span>
-                  <span className="text-white">82.4</span>
+                  <span className="text-white">Native</span>
                 </div>
               </div>
             </div>
@@ -233,15 +275,21 @@ export default function Home() {
                   risk, you get the capital to scale.
                 </p>
               </div>
-              <button className="mt-8 text-primary-container font-semibold flex items-center gap-2 group">
+              <a
+                href="#security"
+                className="mt-8 text-primary-container font-semibold flex items-center gap-2 group"
+              >
                 Learn about advances
                 <span className="material-symbols-outlined group-hover:translate-x-1 transition-transform">
                   arrow_forward
                 </span>
-              </button>
+              </a>
             </div>
 
-            <div className="glass-card lg:col-span-2 rounded-3xl p-8 flex flex-col md:flex-row gap-8 items-center border border-secondary-container/20">
+            <div
+              id="security"
+              className="glass-card lg:col-span-2 rounded-3xl p-8 flex flex-col md:flex-row gap-8 items-center border border-secondary-container/20"
+            >
               <div className="flex-1">
                 <h3 className="font-headline-lg text-headline-lg text-white mb-4">
                   Institutional-Grade Security
@@ -289,50 +337,34 @@ export default function Home() {
           </div>
           <div className="flex flex-wrap justify-center gap-8">
             <a
-              href="#"
+              href="#solutions"
               className="text-slate-500 hover:text-white transition-colors text-sm"
             >
               Smart Contracts
             </a>
             <a
-              href="#"
+              href="#solutions"
               className="text-slate-500 hover:text-white transition-colors text-sm"
             >
               Instant Payouts
             </a>
             <a
-              href="#"
+              href="#security"
               className="text-slate-500 hover:text-white transition-colors text-sm"
             >
               Security
-            </a>
-            <a
-              href="#"
-              className="text-slate-500 hover:text-white transition-colors text-sm"
-            >
-              Terms
-            </a>
-          </div>
-          <div className="flex gap-4">
-            <a
-              href="#"
-              className="opacity-80 hover:opacity-100 transition-opacity"
-            >
-              <span className="material-symbols-outlined text-white">
-                language
-              </span>
-            </a>
-            <a
-              href="#"
-              className="opacity-80 hover:opacity-100 transition-opacity"
-            >
-              <span className="material-symbols-outlined text-white">
-                share
-              </span>
             </a>
           </div>
         </div>
       </footer>
     </>
+  );
+}
+
+export default function Home() {
+  return (
+    <Suspense fallback={null}>
+      <HomeContent />
+    </Suspense>
   );
 }

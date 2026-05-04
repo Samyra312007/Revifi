@@ -1,40 +1,29 @@
-import { Connection, Keypair, PublicKey } from "@solana/web3.js";
+import {
+  Connection,
+  Keypair,
+  PublicKey,
+  SystemProgram,
+  Transaction,
+  LAMPORTS_PER_SOL,
+} from "@solana/web3.js";
 import {
   createAssociatedTokenAccountIdempotentInstruction,
   createTransferInstruction,
   getAssociatedTokenAddress,
 } from "@solana/spl-token";
-import { Transaction } from "@solana/web3.js";
 
-const RPC_URL = process.env.SOLANA_RPC_URL || "https://api.devnet.solana.com";
+const RPC_URL =
+  process.env.SOLANA_RPC_URL ||
+  process.env.NEXT_PUBLIC_SOLANA_RPC_URL ||
+  "https://api.devnet.solana.com";
 
-export const connection = new Connection(RPC_URL, {
-  commitment: "confirmed",
-});
+const USDC_MINT_ADDRESS =
+  process.env.USDC_MINT ||
+  process.env.NEXT_PUBLIC_USDC_MINT ||
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
-export const USDC_MINT = new PublicKey(
-  process.env.USDC_MINT || "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-);
-
-export async function getSolBalance(walletAddress: string): Promise<number> {
-  const pubkey = new PublicKey(walletAddress);
-  const balance = await connection.getBalance(pubkey);
-  return balance / 1e9;
-}
-
-export async function getUSDCBalance(walletAddress: string): Promise<number> {
-  const pubkey = new PublicKey(walletAddress);
-  const tokenAccounts = await connection.getTokenAccountsByOwner(pubkey, {
-    mint: USDC_MINT,
-  });
-
-  if (tokenAccounts.value.length === 0) return 0;
-
-  const accountInfo = await connection.getTokenAccountBalance(
-    tokenAccounts.value[0].pubkey,
-  );
-  return accountInfo.value.uiAmount || 0;
-}
+export const connection = new Connection(RPC_URL, { commitment: "confirmed" });
+export const USDC_MINT = new PublicKey(USDC_MINT_ADDRESS);
 
 function loadTreasuryKeypair(): Keypair | null {
   const raw = process.env.TREASURY_PRIVATE_KEY;
@@ -64,18 +53,13 @@ export async function transferUsdcFromTreasury(
   amountUsdc: number,
 ): Promise<TransferResult> {
   const treasury = loadTreasuryKeypair();
-
   if (!treasury) {
-    return {
-      signature: "SIMULATED_TX_" + Date.now(),
-      simulated: true,
-    };
+    return { signature: "SIMULATED_TX_" + Date.now(), simulated: true };
   }
 
   const recipient = new PublicKey(recipientAddress);
   const fromAta = await getAssociatedTokenAddress(USDC_MINT, treasury.publicKey);
   const toAta = await getAssociatedTokenAddress(USDC_MINT, recipient);
-
   const amountBaseUnits = BigInt(Math.round(amountUsdc * 1_000_000));
 
   const tx = new Transaction();
@@ -88,12 +72,43 @@ export async function transferUsdcFromTreasury(
     ),
   );
   tx.add(
-    createTransferInstruction(
-      fromAta,
-      toAta,
-      treasury.publicKey,
-      amountBaseUnits,
-    ),
+    createTransferInstruction(fromAta, toAta, treasury.publicKey, amountBaseUnits),
+  );
+
+  const { blockhash, lastValidBlockHeight } =
+    await connection.getLatestBlockhash("confirmed");
+  tx.recentBlockhash = blockhash;
+  tx.feePayer = treasury.publicKey;
+  tx.sign(treasury);
+
+  const signature = await connection.sendRawTransaction(tx.serialize(), {
+    skipPreflight: false,
+  });
+  await connection.confirmTransaction(
+    { signature, blockhash, lastValidBlockHeight },
+    "confirmed",
+  );
+  return { signature, simulated: false };
+}
+
+export async function transferSolFromTreasury(
+  recipientAddress: string,
+  amountSol: number,
+): Promise<TransferResult> {
+  const treasury = loadTreasuryKeypair();
+  if (!treasury) {
+    return { signature: "SIMULATED_TX_" + Date.now(), simulated: true };
+  }
+
+  const recipient = new PublicKey(recipientAddress);
+  const lamports = Math.round(amountSol * LAMPORTS_PER_SOL);
+
+  const tx = new Transaction().add(
+    SystemProgram.transfer({
+      fromPubkey: treasury.publicKey,
+      toPubkey: recipient,
+      lamports,
+    }),
   );
 
   const { blockhash, lastValidBlockHeight } =

@@ -1,7 +1,7 @@
 import { createClient } from "./server";
 
 export async function getCurrentUser() {
-  const supabase = await createClient();
+  const supabase = createClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
@@ -9,7 +9,7 @@ export async function getCurrentUser() {
 }
 
 export async function getCreatorProfile(userId: string) {
-  const supabase = await createClient();
+  const supabase = createClient();
   const { data } = await supabase
     .from("creators")
     .select("*")
@@ -19,7 +19,7 @@ export async function getCreatorProfile(userId: string) {
 }
 
 export async function getUserInvoices(userId: string) {
-  const supabase = await createClient();
+  const supabase = createClient();
 
   const creator = await getCreatorProfile(userId);
   if (!creator) return [];
