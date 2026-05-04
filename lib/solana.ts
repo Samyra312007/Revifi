@@ -111,3 +111,36 @@ export async function transferUsdcFromTreasury(
   );
   return { signature, simulated: false };
 }
+
+export async function verifySolanaTransaction(
+  signature: string,
+): Promise<{ confirmed: boolean; slot?: number }> {
+  if (!signature || signature.startsWith("SIMULATED_")) {
+    return { confirmed: false };
+  }
+  try {
+    const status = await connection.getSignatureStatus(signature, {
+      searchTransactionHistory: true,
+    });
+    const value = status.value;
+    if (!value) return { confirmed: false };
+    return {
+      confirmed:
+        value.confirmationStatus === "confirmed" ||
+        value.confirmationStatus === "finalized",
+      slot: value.slot,
+    };
+  } catch (err) {
+    console.error("verifySolanaTransaction error:", err);
+    return { confirmed: false };
+  }
+}
+
+export function isValidSolanaAddress(address: string): boolean {
+  try {
+    const key = new PublicKey(address);
+    return PublicKey.isOnCurve(key.toBytes());
+  } catch {
+    return false;
+  }
+}

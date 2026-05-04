@@ -5,6 +5,7 @@ import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import AuthButton from "@/components/AuthButton";
 import NotificationBell from "@/components/NotificationBell";
+import GlobalSearch from "@/components/GlobalSearch";
 import { downloadCsv } from "@/lib/csv";
 
 interface ActivityItem {
@@ -24,6 +25,15 @@ interface AdvanceableInvoice {
   amount: number;
 }
 
+interface PlatformItem {
+  key: string;
+  name: string;
+  icon: string;
+  connected: boolean;
+  limit: number;
+  handle?: string;
+}
+
 interface PaymentsData {
   availableToAdvance: number;
   activeAdvances: number;
@@ -32,8 +42,16 @@ interface PaymentsData {
   monthlyGrowth: number;
   recentActivity: ActivityItem[];
   advanceableInvoices: AdvanceableInvoice[];
-  platforms: { name: string; icon: string; connected: boolean; limit: number }[];
+  platforms: PlatformItem[];
+  totalAdvanceLimit: number;
 }
+
+const DEFAULT_PLATFORMS: PlatformItem[] = [
+  { key: "youtube", name: "YouTube", icon: "smart_display", connected: false, limit: 25000 },
+  { key: "twitch", name: "Twitch", icon: "stadia_controller", connected: false, limit: 15000 },
+  { key: "instagram", name: "Instagram", icon: "photo_camera", connected: false, limit: 20000 },
+  { key: "tiktok", name: "TikTok", icon: "music_note", connected: false, limit: 18000 },
+];
 
 const DEFAULT_DATA: PaymentsData = {
   availableToAdvance: 0,
@@ -43,12 +61,8 @@ const DEFAULT_DATA: PaymentsData = {
   monthlyGrowth: 0,
   recentActivity: [],
   advanceableInvoices: [],
-  platforms: [
-    { name: "YouTube", icon: "smart_display", connected: false, limit: 25000 },
-    { name: "Twitch", icon: "stadia_controller", connected: false, limit: 15000 },
-    { name: "Instagram", icon: "photo_camera", connected: false, limit: 20000 },
-    { name: "TikTok", icon: "music_note", connected: false, limit: 18000 },
-  ],
+  platforms: DEFAULT_PLATFORMS,
+  totalAdvanceLimit: 10000,
 };
 
 export default function PaymentsPage() {
@@ -61,6 +75,13 @@ export default function PaymentsPage() {
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<string>("");
   const [advanceAmountInput, setAdvanceAmountInput] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
+  const [connecting, setConnecting] = useState<string | null>(null);
+  const [connectForm, setConnectForm] = useState({
+    platform: "youtube",
+    handle: "",
+    follower_count: "",
+    monthly_revenue: "",
+  });
   const supabase = createClient();
 
   useEffect(() => {
@@ -169,6 +190,30 @@ export default function PaymentsPage() {
         ?.filter((i) => i.status === "factored")
         .reduce((sum, i) => sum + Number(i.advance_amount || 0), 0) || 0;
 
+    const { data: platformRows } = await supabase
+      .from("creator_platforms")
+      .select("platform, handle, advance_limit")
+      .eq("user_id", user.id);
+
+    const platforms: PlatformItem[] = DEFAULT_PLATFORMS.map((p) => {
+      const found = platformRows?.find((row: any) => row.platform === p.key);
+      return found
+        ? {
+            ...p,
+            connected: true,
+            limit: Number(found.advance_limit || p.limit),
+            handle: found.handle || undefined,
+          }
+        : p;
+    });
+
+    const totalAdvanceLimit = Math.max(
+      10000,
+      platforms
+        .filter((p) => p.connected)
+        .reduce((sum, p) => sum + Number(p.limit || 0), 0),
+    );
+
     const now = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
     const totalPaidMTD =
@@ -216,15 +261,82 @@ export default function PaymentsPage() {
       availableToAdvance,
       activeAdvances,
       repaymentProgress:
-        activeAdvances > 0 ? Math.min(95, Math.round((activeAdvances / 10000) * 100)) : 0,
+        activeAdvances > 0
+          ? Math.min(
+              99,
+              Math.round((activeAdvances / totalAdvanceLimit) * 100),
+            )
+          : 0,
       totalPaidMTD,
       monthlyGrowth: 12.4,
       recentActivity,
       advanceableInvoices,
-      platforms: DEFAULT_DATA.platforms,
+      platforms,
+      totalAdvanceLimit,
     });
 
     setLoading(false);
+  }
+
+  async function connectPlatform() {
+    if (!connectForm.handle.trim()) {
+      alert("Please enter your handle/channel name");
+      return;
+    }
+    setConnecting(connectForm.platform);
+    try {
+      const res = await fetch("/api/platforms/connect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          platform: connectForm.platform,
+          handle: connectForm.handle.trim(),
+          follower_count: Number(connectForm.follower_count) || 0,
+          monthly_revenue: Number(connectForm.monthly_revenue) || 0,
+        }),
+      });
+      const result = await res.json();
+      if (res.ok && result.success) {
+        alert(
+          `${connectForm.platform} connected! New advance limit: $${Math.round(
+            Number(result.platform.advance_limit),
+          ).toLocaleString()}`,
+        );
+        setShowConnectModal(false);
+        setSelectedPlatform(null);
+        setConnectForm({
+          platform: "youtube",
+          handle: "",
+          follower_count: "",
+          monthly_revenue: "",
+        });
+        fetchPaymentsData();
+      } else {
+        alert("Failed: " + (result.error || "Unknown error"));
+      }
+    } catch (err: any) {
+      alert("Connection failed: " + (err?.message || err));
+    } finally {
+      setConnecting(null);
+    }
+  }
+
+  async function disconnectPlatform(platform: string) {
+    if (!confirm(`Disconnect ${platform}?`)) return;
+    try {
+      const res = await fetch(
+        `/api/platforms/connect?platform=${encodeURIComponent(platform)}`,
+        { method: "DELETE" },
+      );
+      const result = await res.json();
+      if (res.ok && result.success) {
+        fetchPaymentsData();
+      } else {
+        alert("Failed: " + (result.error || "Unknown error"));
+      }
+    } catch (err: any) {
+      alert("Disconnect failed: " + (err?.message || err));
+    }
   }
 
   async function requestAdvance() {
@@ -358,16 +470,7 @@ export default function PaymentsPage() {
 
       <header className="h-16 w-full border-b border-slate-800 sticky top-0 z-40 bg-slate-950/80 backdrop-blur-xl flex justify-between items-center px-8 pl-[288px]">
         <div className="flex-1 max-w-md">
-          <div className="relative group">
-            <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-purple-400 transition-colors">
-              search
-            </span>
-            <input
-              type="text"
-              placeholder="Search transactions or tools..."
-              className="w-full bg-white/5 border-none rounded-full pl-10 pr-4 py-2 text-sm focus:ring-1 focus:ring-purple-500/50 text-slate-200 placeholder-slate-500 transition-all"
-            />
-          </div>
+          <GlobalSearch placeholder="Search transactions, deals..." />
         </div>
 
         <div className="flex items-center gap-4">
@@ -641,13 +744,10 @@ export default function PaymentsPage() {
                   <div className="mt-8 space-y-4 relative z-10">
                     {paymentsData.platforms.map((platform) => (
                       <div
-                        key={platform.name}
-                        onClick={() =>
-                          !platform.connected && setSelectedPlatform(platform.name)
-                        }
-                        className={`flex items-center gap-4 p-3 rounded-lg border transition-colors cursor-pointer ${
+                        key={platform.key}
+                        className={`flex items-center gap-4 p-3 rounded-lg border transition-colors ${
                           platform.connected
-                            ? "bg-white/5 border-white/10 hover:bg-white/10"
+                            ? "bg-secondary/5 border-secondary/30"
                             : "bg-white/5 border-white/10 hover:border-primary/50 hover:bg-primary/5"
                         }`}
                       >
@@ -666,15 +766,39 @@ export default function PaymentsPage() {
                             {platform.icon}
                           </span>
                         </div>
-                        <span className="text-sm font-semibold text-white flex-1">
-                          Connect {platform.name}
-                        </span>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-semibold text-white truncate">
+                            {platform.connected
+                              ? platform.handle || platform.name
+                              : `Connect ${platform.name}`}
+                          </p>
+                          {platform.connected && (
+                            <p className="text-[10px] text-secondary">
+                              Limit: ${Math.round(platform.limit).toLocaleString()}
+                            </p>
+                          )}
+                        </div>
                         {platform.connected ? (
-                          <span className="text-xs text-secondary">Connected</span>
+                          <button
+                            onClick={() => disconnectPlatform(platform.key)}
+                            className="text-[10px] text-slate-400 hover:text-red-400"
+                          >
+                            Disconnect
+                          </button>
                         ) : (
-                          <span className="material-symbols-outlined text-xs text-slate-500">
-                            add
-                          </span>
+                          <button
+                            onClick={() => {
+                              setConnectForm({
+                                ...connectForm,
+                                platform: platform.key,
+                              });
+                              setSelectedPlatform(platform.key);
+                              setShowConnectModal(true);
+                            }}
+                            className="text-xs text-primary hover:underline"
+                          >
+                            Connect
+                          </button>
                         )}
                       </div>
                     ))}
@@ -683,7 +807,7 @@ export default function PaymentsPage() {
                       onClick={() => setShowConnectModal(true)}
                       className="w-full mt-8 bg-white text-slate-950 px-6 py-3 rounded-xl font-bold hover:bg-slate-200 transition-all active:scale-[0.98] relative z-10"
                     >
-                      Upgrade Account
+                      Connect Another Platform
                     </button>
                   </div>
                 </div>
@@ -820,62 +944,104 @@ export default function PaymentsPage() {
               </button>
             </div>
 
-            <div className="space-y-6">
+            <div className="space-y-5">
               <p className="text-slate-400 text-sm">
-                Connect your social media accounts to verify your earnings and
-                unlock higher advance limits.
+                Provide your channel/handle and stats. Verified analytics
+                increase your advance limit.
               </p>
 
-              <div className="space-y-3">
-                <button
-                  onClick={() => {
-                    setSelectedPlatform("YouTube");
-                    setShowConnectModal(false);
-                    alert(
-                      "YouTube connected successfully! Your limit has been increased.",
-                    );
-                  }}
-                  className="w-full flex items-center gap-4 p-4 rounded-xl bg-surface-container border border-white/10 hover:border-primary/50 transition-all"
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Platform
+                </label>
+                <select
+                  value={connectForm.platform}
+                  onChange={(e) =>
+                    setConnectForm({ ...connectForm, platform: e.target.value })
+                  }
+                  className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary"
                 >
-                  <div className="w-10 h-10 rounded bg-red-600 flex items-center justify-center">
-                    <span className="material-symbols-outlined text-white">
-                      smart_display
-                    </span>
-                  </div>
-                  <div className="flex-1 text-left">
-                    <p className="font-semibold text-white">Connect YouTube</p>
-                    <p className="text-xs text-slate-500">
-                      Verify channel analytics
-                    </p>
-                  </div>
-                  <span className="material-symbols-outlined text-slate-500">
-                    chevron_right
-                  </span>
-                </button>
+                  <option value="youtube">YouTube</option>
+                  <option value="twitch">Twitch</option>
+                  <option value="instagram">Instagram</option>
+                  <option value="tiktok">TikTok</option>
+                  <option value="twitter">X / Twitter</option>
+                </select>
+              </div>
 
-                <button className="w-full flex items-center gap-4 p-4 rounded-xl bg-surface-container border border-white/10 hover:border-primary/50 transition-all">
-                  <div className="w-10 h-10 rounded bg-[#1DA1F2] flex items-center justify-center">
-                    <span className="material-symbols-outlined text-white">
-                      alternate_email
-                    </span>
-                  </div>
-                  <div className="flex-1 text-left">
-                    <p className="font-semibold text-white">Connect X / Twitter</p>
-                    <p className="text-xs text-slate-500">
-                      Verify engagement metrics
-                    </p>
-                  </div>
-                  <span className="material-symbols-outlined text-slate-500">
-                    chevron_right
-                  </span>
-                </button>
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  Handle / Channel
+                </label>
+                <input
+                  type="text"
+                  value={connectForm.handle}
+                  onChange={(e) =>
+                    setConnectForm({ ...connectForm, handle: e.target.value })
+                  }
+                  placeholder="@yourhandle"
+                  className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                    Followers
+                  </label>
+                  <input
+                    type="number"
+                    value={connectForm.follower_count}
+                    onChange={(e) =>
+                      setConnectForm({
+                        ...connectForm,
+                        follower_count: e.target.value,
+                      })
+                    }
+                    placeholder="50000"
+                    className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-300 mb-2">
+                    Monthly Revenue ($)
+                  </label>
+                  <input
+                    type="number"
+                    value={connectForm.monthly_revenue}
+                    onChange={(e) =>
+                      setConnectForm({
+                        ...connectForm,
+                        monthly_revenue: e.target.value,
+                      })
+                    }
+                    placeholder="3000"
+                    className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary"
+                  />
+                </div>
               </div>
 
               <div className="bg-white/5 rounded-lg p-4">
                 <p className="text-xs text-slate-400 text-center">
-                  By connecting, you agree to share analytics data for
-                  verification purposes.
+                  Limits use formula: <code>3× monthly revenue + $0.05/follower</code>{" "}
+                  (capped at $100k).
                 </p>
+              </div>
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  onClick={() => setShowConnectModal(false)}
+                  className="flex-1 border border-white/10 text-white py-3 rounded-lg hover:bg-white/5 transition-all"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={connectPlatform}
+                  disabled={connecting !== null}
+                  className="flex-1 bg-gradient-to-r from-primary-container to-inverse-primary text-white py-3 rounded-lg hover:brightness-110 transition-all font-semibold disabled:opacity-50"
+                >
+                  {connecting ? "Connecting..." : "Connect"}
+                </button>
               </div>
             </div>
           </div>

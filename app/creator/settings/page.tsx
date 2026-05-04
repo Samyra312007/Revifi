@@ -74,12 +74,28 @@ export default function SettingsPage() {
   }
 
   async function deleteAccount() {
-    if (
-      confirm(
-        "Are you sure? This action cannot be undone. To proceed, our support team will reach out to verify your identity.",
-      )
-    ) {
-      alert("Account deletion request received. Support will contact you within 48 hours.");
+    const confirmed = confirm(
+      "Permanently delete your account? This will erase your profile, deals, transactions, and notifications. This cannot be undone.",
+    );
+    if (!confirmed) return;
+    const typed = prompt('Type "DELETE" to confirm.');
+    if (typed !== "DELETE") {
+      alert("Deletion cancelled.");
+      return;
+    }
+
+    try {
+      const res = await fetch("/api/account/delete", { method: "POST" });
+      const result = await res.json();
+      if (res.ok && result.success) {
+        await supabase.auth.signOut();
+        alert("Your account has been deleted.");
+        router.push("/");
+      } else {
+        alert("Failed to delete account: " + (result.error || "Unknown error"));
+      }
+    } catch (err: any) {
+      alert("Failed to delete account: " + (err?.message || err));
     }
   }
 

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import AuthButton from "@/components/AuthButton";
 import NotificationBell from "@/components/NotificationBell";
+import GlobalSearch from "@/components/GlobalSearch";
 
 interface Brand {
   id: string;
@@ -380,16 +381,7 @@ export default function DealsPage() {
 
       <header className="h-16 w-full border-b border-slate-800 sticky top-0 z-40 bg-slate-950/80 backdrop-blur-xl flex justify-between items-center px-8 pl-[288px]">
         <div className="flex-1 max-w-md">
-          <div className="relative group">
-            <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-purple-400 transition-colors">
-              search
-            </span>
-            <input
-              type="text"
-              placeholder="Search deals, brands, or contracts..."
-              className="w-full bg-white/5 border-none rounded-full pl-10 pr-4 py-2 text-sm focus:ring-1 focus:ring-purple-500/50 text-slate-200 placeholder-slate-500 transition-all"
-            />
-          </div>
+          <GlobalSearch placeholder="Search deals, brands, transactions..." />
         </div>
 
         <div className="flex items-center gap-4">

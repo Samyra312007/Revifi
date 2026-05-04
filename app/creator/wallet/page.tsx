@@ -7,7 +7,18 @@ import { getSolBalance, getUSDCBalance } from "@/lib/solana";
 import AuthButton from "@/components/AuthButton";
 import NotificationBell from "@/components/NotificationBell";
 import PhantomConnect from "@/components/PhantomConnect";
+import GlobalSearch from "@/components/GlobalSearch";
+import {
+  sendSolWithPhantom,
+  sendUsdcWithPhantom,
+} from "@/lib/phantom";
 import { downloadCsv } from "@/lib/csv";
+
+const RPC_URL =
+  process.env.NEXT_PUBLIC_SOLANA_RPC_URL || "https://api.devnet.solana.com";
+const USDC_MINT_ADDRESS =
+  process.env.NEXT_PUBLIC_USDC_MINT ||
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
 interface ActivityItem {
   id: string;
@@ -51,6 +62,10 @@ export default function WalletPage() {
   const [walletData, setWalletData] = useState<WalletData>(DEFAULT_WALLET);
   const [loading, setLoading] = useState(true);
   const [authed, setAuthed] = useState(false);
+  const [withdrawAmount, setWithdrawAmount] = useState("");
+  const [withdrawDest, setWithdrawDest] = useState("");
+  const [withdrawAsset, setWithdrawAsset] = useState<"SOL" | "USDC">("USDC");
+  const [withdrawing, setWithdrawing] = useState(false);
   const supabase = createClient();
 
   useEffect(() => {
@@ -213,6 +228,82 @@ export default function WalletPage() {
     setLoading(false);
   }
 
+  async function submitWithdraw() {
+    const amount = Number(withdrawAmount);
+    if (!amount || amount <= 0) {
+      alert("Enter a valid amount");
+      return;
+    }
+    if (selectedMethod === "crypto" && !withdrawDest.trim()) {
+      alert("Enter a destination Solana address");
+      return;
+    }
+
+    setWithdrawing(true);
+    try {
+      let signature: string | undefined;
+
+      if (selectedMethod === "crypto" && walletData.walletAddress) {
+        try {
+          if (withdrawAsset === "SOL") {
+            const solAmount = amount / SOL_PRICE_USD;
+            signature = await sendSolWithPhantom(
+              withdrawDest.trim(),
+              solAmount,
+              RPC_URL,
+            );
+          } else {
+            signature = await sendUsdcWithPhantom(
+              withdrawDest.trim(),
+              amount,
+              RPC_URL,
+              USDC_MINT_ADDRESS,
+            );
+          }
+        } catch (err: any) {
+          if (
+            !confirm(
+              `Phantom signing failed: ${err?.message || err}. Submit withdrawal request anyway?`,
+            )
+          ) {
+            setWithdrawing(false);
+            return;
+          }
+        }
+      }
+
+      const res = await fetch("/api/wallet/withdraw", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          method: selectedMethod,
+          asset: selectedMethod === "crypto" ? withdrawAsset : "USD",
+          amount,
+          destination: selectedMethod === "crypto" ? withdrawDest.trim() : null,
+          signature,
+        }),
+      });
+      const result = await res.json();
+      if (res.ok && result.success) {
+        alert(
+          result.simulated
+            ? "Withdrawal recorded (simulated). Configure TREASURY_PRIVATE_KEY for real transfers."
+            : "Withdrawal submitted!",
+        );
+        setShowWithdrawModal(false);
+        setWithdrawAmount("");
+        setWithdrawDest("");
+        fetchWalletData();
+      } else {
+        alert("Failed: " + (result.error || "Unknown error"));
+      }
+    } catch (err: any) {
+      alert("Withdrawal failed: " + (err?.message || err));
+    } finally {
+      setWithdrawing(false);
+    }
+  }
+
   const getStatusIcon = (status: string) => {
     const icons: Record<string, string> = {
       Settled: "check_circle",
@@ -326,16 +417,7 @@ export default function WalletPage() {
 
       <header className="h-16 ml-64 bg-slate-950/80 backdrop-blur-xl border-b border-slate-800 sticky top-0 z-40 flex justify-between items-center px-8">
         <div className="flex items-center gap-4 flex-1">
-          <div className="relative w-full max-w-md flex items-center">
-            <span className="material-symbols-outlined absolute left-3 text-slate-500 text-sm">
-              search
-            </span>
-            <input
-              className="w-full bg-surface-container-low border-none rounded-full py-2 pl-10 pr-4 text-sm focus:ring-1 focus:ring-purple-500/50 text-on-surface placeholder:text-slate-600"
-              placeholder="Search transactions, creators..."
-              type="text"
-            />
-          </div>
+          <GlobalSearch placeholder="Search transactions, deals..." />
         </div>
 
         <div className="flex items-center gap-6">
@@ -794,10 +876,12 @@ export default function WalletPage() {
 
               <div>
                 <label className="block text-sm font-medium text-slate-300 mb-2">
-                  Amount
+                  Amount (USD)
                 </label>
                 <input
                   type="number"
+                  value={withdrawAmount}
+                  onChange={(e) => setWithdrawAmount(e.target.value)}
                   placeholder="Enter amount"
                   className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary"
                 />
@@ -814,9 +898,16 @@ export default function WalletPage() {
                   <label className="block text-sm font-medium text-slate-300 mb-2">
                     Bank Account
                   </label>
-                  <select className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary">
-                    <option>Add new bank account</option>
-                  </select>
+                  <input
+                    type="text"
+                    value={withdrawDest}
+                    onChange={(e) => setWithdrawDest(e.target.value)}
+                    placeholder="Routing/Account number or label"
+                    className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary"
+                  />
+                  <p className="text-xs text-slate-500 mt-1">
+                    Bank transfers carry a 1% fee, settled in 2-5 minutes.
+                  </p>
                 </div>
               )}
 
@@ -826,13 +917,27 @@ export default function WalletPage() {
                     Select Asset
                   </label>
                   <div className="flex gap-3">
-                    <button className="flex-1 p-3 rounded-lg border border-primary bg-primary/10 text-primary">
+                    <button
+                      onClick={() => setWithdrawAsset("SOL")}
+                      className={`flex-1 p-3 rounded-lg border transition-all ${
+                        withdrawAsset === "SOL"
+                          ? "border-primary bg-primary/10 text-primary"
+                          : "border-white/10 text-slate-400 hover:border-primary/50"
+                      }`}
+                    >
                       <span className="material-symbols-outlined block mx-auto mb-1">
                         currency_bitcoin
                       </span>
                       <span className="text-xs">SOL</span>
                     </button>
-                    <button className="flex-1 p-3 rounded-lg border border-white/10 text-slate-400 hover:border-primary/50">
+                    <button
+                      onClick={() => setWithdrawAsset("USDC")}
+                      className={`flex-1 p-3 rounded-lg border transition-all ${
+                        withdrawAsset === "USDC"
+                          ? "border-primary bg-primary/10 text-primary"
+                          : "border-white/10 text-slate-400 hover:border-primary/50"
+                      }`}
+                    >
                       <span className="material-symbols-outlined block mx-auto mb-1">
                         attach_money
                       </span>
@@ -841,9 +946,17 @@ export default function WalletPage() {
                   </div>
                   <input
                     type="text"
-                    placeholder="Wallet address"
+                    value={withdrawDest}
+                    onChange={(e) => setWithdrawDest(e.target.value)}
+                    placeholder="Destination Solana wallet address"
                     className="w-full mt-3 bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary"
                   />
+                  {!walletData.walletAddress && (
+                    <p className="text-xs text-yellow-400 mt-2">
+                      Tip: Connect Phantom in the header to sign this transfer
+                      from your own wallet. Otherwise the treasury will pay out.
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -855,13 +968,11 @@ export default function WalletPage() {
                   Cancel
                 </button>
                 <button
-                  onClick={() => {
-                    setShowWithdrawModal(false);
-                    alert("Withdrawal request submitted successfully!");
-                  }}
-                  className="flex-1 bg-gradient-to-r from-primary-container to-inverse-primary text-white py-3 rounded-lg hover:brightness-110 transition-all font-semibold"
+                  onClick={submitWithdraw}
+                  disabled={withdrawing}
+                  className="flex-1 bg-gradient-to-r from-primary-container to-inverse-primary text-white py-3 rounded-lg hover:brightness-110 transition-all font-semibold disabled:opacity-50"
                 >
-                  Confirm Withdrawal
+                  {withdrawing ? "Processing..." : "Confirm Withdrawal"}
                 </button>
               </div>
             </div>
@@ -883,75 +994,75 @@ export default function WalletPage() {
             </div>
 
             <div className="space-y-6">
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-2">
-                  Select Asset
-                </label>
-                <div className="flex gap-3">
-                  <button className="flex-1 p-3 rounded-lg border border-primary bg-primary/10 text-primary">
-                    <span className="material-symbols-outlined block mx-auto mb-1">
-                      currency_bitcoin
-                    </span>
-                    <span className="text-xs">SOL</span>
-                  </button>
-                  <button className="flex-1 p-3 rounded-lg border border-white/10 text-slate-400 hover:border-primary/50">
-                    <span className="material-symbols-outlined block mx-auto mb-1">
-                      attach_money
-                    </span>
-                    <span className="text-xs">USDC</span>
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-2">
-                  Amount
-                </label>
-                <input
-                  type="number"
-                  placeholder="Enter amount"
-                  className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary"
-                />
-              </div>
-
-              <div className="bg-secondary-container/10 rounded-xl p-4 border border-secondary-container/20">
-                <p className="text-sm text-slate-400 mb-1">Network</p>
-                <p className="text-white font-semibold">Solana (SOL) Network</p>
-                <p className="text-xs text-slate-500 mt-2">Deposit address:</p>
-                <p className="text-xs font-mono text-primary break-all mt-1">
-                  {walletData.walletAddress ||
-                    "Add a Solana wallet in Settings to get a deposit address"}
-                </p>
-                {walletData.walletAddress && (
-                  <button
-                    onClick={() => {
-                      navigator.clipboard.writeText(walletData.walletAddress!);
-                      alert("Address copied!");
-                    }}
-                    className="mt-2 text-xs text-primary hover:underline"
+              {!walletData.walletAddress ? (
+                <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-xl p-4">
+                  <p className="text-sm text-yellow-300">
+                    Connect or save a Solana wallet to generate a deposit
+                    address.
+                  </p>
+                  <Link
+                    href="/creator/settings"
+                    className="mt-3 inline-block text-xs text-primary underline"
                   >
-                    Copy Address
-                  </button>
-                )}
-              </div>
+                    Open Settings
+                  </Link>
+                </div>
+              ) : (
+                <>
+                  <div className="bg-secondary-container/10 rounded-xl p-4 border border-secondary-container/20">
+                    <p className="text-sm text-slate-400 mb-1">Network</p>
+                    <p className="text-white font-semibold mb-3">
+                      Solana (SPL) Network · SOL or USDC
+                    </p>
+                    <div className="bg-white p-2 rounded-lg w-fit mx-auto">
+                      <img
+                        alt="Deposit QR"
+                        width={160}
+                        height={160}
+                        src={`https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(
+                          `solana:${walletData.walletAddress}`,
+                        )}`}
+                      />
+                    </div>
+                    <p className="text-xs text-slate-500 mt-3">Deposit address:</p>
+                    <p className="text-xs font-mono text-primary break-all mt-1">
+                      {walletData.walletAddress}
+                    </p>
+                    <div className="flex gap-3 mt-3">
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(
+                            walletData.walletAddress!,
+                          );
+                          alert("Address copied!");
+                        }}
+                        className="text-xs text-primary hover:underline"
+                      >
+                        Copy Address
+                      </button>
+                      <a
+                        href={`https://explorer.solana.com/address/${walletData.walletAddress}?cluster=devnet`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs text-slate-400 hover:underline"
+                      >
+                        View on Explorer
+                      </a>
+                    </div>
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    Send only SOL or SPL tokens (USDC) to this address. Sending
+                    other assets will result in permanent loss.
+                  </p>
+                </>
+              )}
 
-              <div className="flex gap-3">
-                <button
-                  onClick={() => setShowAddFundsModal(false)}
-                  className="flex-1 border border-white/10 text-white py-3 rounded-lg hover:bg-white/5 transition-all"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={() => {
-                    setShowAddFundsModal(false);
-                    alert("Deposit instructions sent to your email!");
-                  }}
-                  className="flex-1 bg-gradient-to-r from-primary-container to-inverse-primary text-white py-3 rounded-lg hover:brightness-110 transition-all font-semibold"
-                >
-                  Get Deposit Address
-                </button>
-              </div>
+              <button
+                onClick={() => setShowAddFundsModal(false)}
+                className="w-full border border-white/10 text-white py-3 rounded-lg hover:bg-white/5 transition-all"
+              >
+                Done
+              </button>
             </div>
           </div>
         </div>

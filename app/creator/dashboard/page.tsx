@@ -5,6 +5,8 @@ import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import AuthButton from "@/components/AuthButton";
 import NotificationBell from "@/components/NotificationBell";
+import GlobalSearch from "@/components/GlobalSearch";
+import MonthlyChart from "@/components/MonthlyChart";
 
 interface DashboardStats {
   availableLiquidity: number;
@@ -12,6 +14,13 @@ interface DashboardStats {
   activeAdvances: number;
   pendingPayments: number;
   completedPayments: number;
+}
+
+interface MonthlyPoint {
+  month: string;
+  earnings: number;
+  advances: number;
+  payments: number;
 }
 
 interface UpcomingPayout {
@@ -38,22 +47,15 @@ export default function CreatorDashboard() {
   const [recentTransactions, setRecentTransactions] = useState<
     RecentTransaction[]
   >([]);
+  const [recentSettlements, setRecentSettlements] = useState<
+    RecentTransaction[]
+  >([]);
+  const [monthly, setMonthly] = useState<MonthlyPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAdvanceModal, setShowAdvanceModal] = useState(false);
   const [selectedInvoice, setSelectedInvoice] = useState<any>(null);
-  const [searchQuery, setSearchQuery] = useState("");
 
   const supabase = createClient();
-
-  const filteredTransactions = recentTransactions.filter((tx) => {
-    if (!searchQuery.trim()) return true;
-    const q = searchQuery.toLowerCase();
-    return (
-      tx.deal_name?.toLowerCase().includes(q) ||
-      tx.type.toLowerCase().includes(q) ||
-      tx.status.toLowerCase().includes(q)
-    );
-  });
 
   useEffect(() => {
     fetchDashboardData();
@@ -156,18 +158,32 @@ export default function CreatorDashboard() {
       .limit(10);
 
     if (transactions) {
-      setRecentTransactions(
-        transactions.map((t: any) => ({
-          id: t.id,
-          type: t.type,
-          amount: t.amount,
-          status: t.status,
-          created_at: t.created_at,
-          deal_name: Array.isArray(t.invoice)
-            ? t.invoice?.[0]?.deal_name
-            : t.invoice?.deal_name,
-        })),
+      const mapped = transactions.map((t: any) => ({
+        id: t.id,
+        type: t.type,
+        amount: t.amount,
+        status: t.status,
+        created_at: t.created_at,
+        deal_name: Array.isArray(t.invoice)
+          ? t.invoice?.[0]?.deal_name
+          : t.invoice?.deal_name,
+      }));
+      setRecentTransactions(mapped);
+      setRecentSettlements(
+        mapped.filter(
+          (t) =>
+            (t.type === "payment" || t.type === "advance") &&
+            t.status === "completed",
+        ),
       );
+    }
+
+    const { data: monthlyData } = await supabase.rpc(
+      "get_creator_monthly_earnings",
+      { p_user_id: user.id },
+    );
+    if (monthlyData) {
+      setMonthly(monthlyData as MonthlyPoint[]);
     }
 
     setLoading(false);
@@ -271,18 +287,7 @@ export default function CreatorDashboard() {
 
       <header className="h-16 w-full border-b border-slate-800 sticky top-0 z-40 bg-slate-950/80 backdrop-blur-xl flex justify-between items-center px-8 pl-[288px]">
         <div className="flex-1 max-w-md">
-          <div className="relative group">
-            <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-purple-400 transition-colors">
-              search
-            </span>
-            <input
-              type="text"
-              placeholder="Search transactions..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full bg-white/5 border-none rounded-full pl-10 pr-4 py-2 text-sm focus:ring-1 focus:ring-purple-500/50 text-slate-200 placeholder-slate-500 transition-all"
-            />
-          </div>
+          <GlobalSearch placeholder="Search transactions, deals, brands..." />
         </div>
 
         <div className="flex items-center gap-4">
@@ -375,6 +380,54 @@ export default function CreatorDashboard() {
 
           <div className="glass-card rounded-xl p-6">
             <h3 className="font-headline-md text-on-surface mb-4">
+              Monthly Earnings
+            </h3>
+            <MonthlyChart data={monthly} />
+          </div>
+
+          <div className="glass-card rounded-xl p-6">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="font-headline-md text-on-surface">
+                Recent Settlements
+              </h3>
+              <Link
+                href="/creator/payments"
+                className="text-primary text-sm hover:underline"
+              >
+                View All
+              </Link>
+            </div>
+            <div className="space-y-3">
+              {recentSettlements.length === 0 ? (
+                <p className="text-slate-500 text-center py-6">
+                  No settlements yet
+                </p>
+              ) : (
+                recentSettlements.slice(0, 5).map((tx) => (
+                  <div
+                    key={tx.id}
+                    className="flex items-center justify-between p-3 rounded-lg hover:bg-white/5"
+                  >
+                    <div>
+                      <p className="text-sm font-semibold text-white capitalize">
+                        {tx.type === "advance" ? "Instant Advance" : "Payment"}
+                      </p>
+                      <p className="text-xs text-slate-500">
+                        {tx.deal_name ||
+                          new Date(tx.created_at).toLocaleDateString()}
+                      </p>
+                    </div>
+                    <p className="font-bold text-green-400">
+                      +${Math.abs(tx.amount).toLocaleString()}
+                    </p>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div className="glass-card rounded-xl p-6">
+            <h3 className="font-headline-md text-on-surface mb-4">
               Upcoming Payouts
             </h3>
             <div className="space-y-4">
@@ -433,12 +486,8 @@ export default function CreatorDashboard() {
                 <p className="text-slate-500 text-center py-8">
                   No transactions yet
                 </p>
-              ) : filteredTransactions.length === 0 ? (
-                <p className="text-slate-500 text-center py-8">
-                  No transactions match &ldquo;{searchQuery}&rdquo;
-                </p>
               ) : (
-                filteredTransactions.map((tx) => (
+                recentTransactions.map((tx) => (
                   <div
                     key={tx.id}
                     className="flex items-center justify-between p-3 rounded-lg hover:bg-white/5"
