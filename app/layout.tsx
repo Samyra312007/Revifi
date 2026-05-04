@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import AuthButton from "@/components/AuthButton";
 
 export const metadata: Metadata = {
   title: "Revifi - Financial Stability for the Creator Economy",
@@ -25,12 +24,7 @@ export default function RootLayout({
           rel="stylesheet"
         />
       </head>
-      <body>
-        <div className="fixed top-4 right-4 z-50">
-          <AuthButton />
-        </div>
-        {children}
-      </body>
+      <body>{children}</body>
     </html>
   );
 }

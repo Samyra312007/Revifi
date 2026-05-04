@@ -1,7 +1,43 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
+import { createClient } from "@/lib/supabase/client";
+import { getSolBalance, getUSDCBalance } from "@/lib/solana";
+import AuthButton from "@/components/AuthButton";
+
+interface ActivityItem {
+  id: string;
+  type: string;
+  title: string;
+  description: string;
+  date: string;
+  status: "Settled" | "Processing" | "Pending";
+  amount: number;
+  transactionType: "credit" | "debit" | "exchange";
+}
+
+interface WalletData {
+  walletAddress: string | null;
+  totalBalance: number;
+  solBalance: number;
+  solValue: number;
+  usdcBalance: number;
+  assetAllocation: { sol: number; usdc: number };
+  recentActivity: ActivityItem[];
+}
+
+const SOL_PRICE_USD = 110;
+
+const DEFAULT_WALLET: WalletData = {
+  walletAddress: null,
+  totalBalance: 0,
+  solBalance: 0,
+  solValue: 0,
+  usdcBalance: 0,
+  assetAllocation: { sol: 0, usdc: 0 },
+  recentActivity: [],
+};
 
 export default function WalletPage() {
   const [showWithdrawModal, setShowWithdrawModal] = useState(false);
@@ -9,74 +45,114 @@ export default function WalletPage() {
   const [selectedMethod, setSelectedMethod] = useState<"bank" | "crypto">(
     "bank",
   );
+  const [walletData, setWalletData] = useState<WalletData>(DEFAULT_WALLET);
+  const [loading, setLoading] = useState(true);
+  const [authed, setAuthed] = useState(false);
+  const supabase = createClient();
 
-  const walletData = {
-    totalBalance: 124592.8,
-    solBalance: 842.12,
-    solValue: 92633.2,
-    usdcBalance: 31959.6,
-    assetAllocation: {
-      sol: 74.3,
-      usdc: 25.7,
-    },
-    recentActivity: [
-      {
-        id: 1,
-        type: "advance",
-        title: "Instant Advance",
-        description: "From YouTube Sponsorship",
-        date: "Oct 24, 2023",
-        status: "Settled",
-        amount: 12000,
-        transactionType: "credit",
-        platform: "youtube",
-      },
-      {
-        id: 2,
-        type: "withdrawal",
-        title: "Bank Withdrawal",
-        description: "Chase Bank (****4829)",
-        date: "Oct 23, 2023",
-        status: "Processing",
-        amount: 4500,
-        transactionType: "debit",
-        platform: "bank",
-      },
-      {
-        id: 3,
-        type: "reward",
-        title: "Referral Reward",
-        description: "Program Incentive",
-        date: "Oct 21, 2023",
-        status: "Settled",
-        amount: 250,
-        transactionType: "credit",
-        platform: "revifi",
-      },
-      {
-        id: 4,
-        type: "swap",
-        title: "Currency Swap",
-        description: "USDC to SOL",
-        date: "Oct 20, 2023",
-        status: "Settled",
-        amount: 1500,
-        transactionType: "exchange",
-        platform: "revifi",
-      },
-      {
-        id: 5,
-        type: "payment",
-        title: "Sponsorship Payment",
-        description: "From Nebula Tech",
-        date: "Oct 18, 2023",
-        status: "Settled",
-        amount: 8500,
-        transactionType: "credit",
-        platform: "brand",
-      },
-    ],
-  };
+  useEffect(() => {
+    fetchWalletData();
+  }, []);
+
+  async function fetchWalletData() {
+    setLoading(true);
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      setAuthed(false);
+      setWalletData(DEFAULT_WALLET);
+      setLoading(false);
+      return;
+    }
+    setAuthed(true);
+
+    const { data: userProfile } = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", user.id)
+      .single();
+
+    let solBalance = 0;
+    let usdcBalance = 0;
+
+    if (userProfile?.solana_wallet) {
+      try {
+        solBalance = await getSolBalance(userProfile.solana_wallet);
+      } catch (err) {
+        console.error("Failed to fetch SOL balance:", err);
+      }
+      try {
+        usdcBalance = await getUSDCBalance(userProfile.solana_wallet);
+      } catch (err) {
+        console.error("Failed to fetch USDC balance:", err);
+      }
+    }
+
+    const solValue = solBalance * SOL_PRICE_USD;
+    const totalBalance = solValue + usdcBalance;
+    const allocSol = totalBalance > 0 ? (solValue / totalBalance) * 100 : 0;
+    const allocUsdc = totalBalance > 0 ? (usdcBalance / totalBalance) * 100 : 0;
+
+    const { data: transactions } = await supabase
+      .from("transactions")
+      .select("id, type, amount, status, created_at, metadata")
+      .eq("user_id", user.id)
+      .order("created_at", { ascending: false })
+      .limit(10);
+
+    const recentActivity: ActivityItem[] = (transactions || []).map((t) => {
+      const isPayment = t.type === "payment";
+      const isAdvance = t.type === "advance";
+      const isWithdrawal = t.type === "withdrawal";
+      const isRepayment = t.type === "repayment";
+      const isSwap = t.type === "swap";
+      const title = isPayment
+        ? "Payment Received"
+        : isAdvance
+          ? "Instant Advance"
+          : isWithdrawal
+            ? "Withdrawal"
+            : isRepayment
+              ? "Advance Repayment"
+              : isSwap
+                ? "Currency Swap"
+                : "Transaction";
+      const status: ActivityItem["status"] =
+        t.status === "completed"
+          ? "Settled"
+          : t.status === "pending"
+            ? "Processing"
+            : "Pending";
+      const transactionType: ActivityItem["transactionType"] = isSwap
+        ? "exchange"
+        : isPayment || isAdvance
+          ? "credit"
+          : "debit";
+      return {
+        id: t.id,
+        type: t.type,
+        title,
+        description: t.metadata?.description || "Transaction completed",
+        date: new Date(t.created_at).toLocaleDateString(),
+        status,
+        amount: Number(t.amount || 0),
+        transactionType,
+      };
+    });
+
+    setWalletData({
+      walletAddress: userProfile?.solana_wallet || null,
+      totalBalance,
+      solBalance,
+      solValue,
+      usdcBalance,
+      assetAllocation: { sol: allocSol, usdc: allocUsdc },
+      recentActivity,
+    });
+    setLoading(false);
+  }
 
   const getStatusIcon = (status: string) => {
     const icons: Record<string, string> = {
@@ -94,6 +170,7 @@ export default function WalletPage() {
       reward: "card_giftcard",
       swap: "swap_horiz",
       payment: "payments",
+      repayment: "redo",
     };
     return icons[type] || "receipt";
   };
@@ -105,11 +182,23 @@ export default function WalletPage() {
       reward: "text-primary",
       swap: "text-primary",
       payment: "text-secondary-container",
+      repayment: "text-slate-400",
     };
     return colors[type] || "text-white";
   };
 
   const chartData = [40, 55, 45, 70, 60, 85, 75, 90, 65, 80, 95, 88];
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
+          <p className="text-slate-400">Loading wallet...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background">
@@ -138,7 +227,7 @@ export default function WalletPage() {
           </Link>
           <Link
             href="/creator/deals"
-            className="flex items-to-center gap-3 px-6 py-3 text-slate-400 hover:text-slate-100 hover:bg-white/5 transition-all"
+            className="flex items-center gap-3 px-6 py-3 text-slate-400 hover:text-slate-100 hover:bg-white/5 transition-all"
           >
             <span className="material-symbols-outlined">handshake</span>
             <span>Deals</span>
@@ -172,21 +261,7 @@ export default function WalletPage() {
             <span className="material-symbols-outlined">contact_support</span>
             <span>Support</span>
           </Link>
-          <div className="px-6 mt-6 flex items-center gap-3">
-            <img
-              alt="Creator Profile"
-              className="w-8 h-8 rounded-full border border-purple-500/30"
-              src="https://lh3.googleusercontent.com/aida-public/AB6AXuBniduSkFuNtTPhbh8s0f9NDOMNFQwuFPdYofe6JSM3N_yNnm5UYTUR78sTIrELHeevXppWRLtub3AOxfZWitYv9VdjLMvGF3MHdJHoLE2_-pzac27mX1hUUhGlR0oeAv-xgleMikb-lIkkyCJmVAuo9Hw-PltYlZSs3H2Vl-oBmxbYKvxTkfIMIrfydnstxjH6GwW62Op7voDex6eq7iFZTQi0NuYp6ImWiTQJwRJe1I4JjGkdCGSMx1lWjM5bZfvxE1F14TYqEZ0F"
-            />
-            <div className="overflow-hidden">
-              <p className="text-sm font-bold text-on-surface truncate">
-                Alex Rivera
-              </p>
-              <p className="text-[10px] text-slate-500 uppercase">
-                Pro Creator
-              </p>
-            </div>
-          </div>
+          <AuthButton />
         </div>
       </aside>
 
@@ -222,6 +297,25 @@ export default function WalletPage() {
       </header>
 
       <main className="ml-64 p-8 max-w-[1440px] mx-auto">
+        {!authed && (
+          <div className="glass-card rounded-xl p-6 mb-6 border border-yellow-500/20 bg-yellow-500/5">
+            <p className="text-yellow-400 text-sm">
+              Sign in to view your wallet balance and transactions.
+            </p>
+          </div>
+        )}
+        {authed && !walletData.walletAddress && (
+          <div className="glass-card rounded-xl p-6 mb-6 border border-purple-500/20 bg-purple-500/5">
+            <p className="text-purple-300 text-sm">
+              No Solana wallet linked yet.{" "}
+              <Link href="/creator/settings" className="underline font-semibold">
+                Add one in Settings
+              </Link>{" "}
+              to see your live balances.
+            </p>
+          </div>
+        )}
+
         <section className="mb-8 relative overflow-hidden rounded-xl bg-surface-container-high p-12 border border-white/5">
           <div className="absolute inset-0 bg-gradient-to-br from-purple-500/10 to-transparent pointer-events-none"></div>
           <div className="relative z-10 flex flex-col md:flex-row justify-between items-end gap-4">
@@ -230,7 +324,10 @@ export default function WalletPage() {
                 Total Wallet Balance
               </label>
               <h2 className="text-display-xl font-display-xl text-white tracking-tighter">
-                ${walletData.totalBalance.toLocaleString()}
+                $
+                {walletData.totalBalance.toLocaleString(undefined, {
+                  maximumFractionDigits: 2,
+                })}
               </h2>
               <div className="flex items-center gap-4 mt-6">
                 <div className="flex items-center gap-3 bg-surface-container/50 px-4 py-2 rounded-lg border border-white/5">
@@ -241,10 +338,13 @@ export default function WalletPage() {
                   </div>
                   <div>
                     <p className="text-data-mono font-data-mono text-white">
-                      {walletData.solBalance} SOL
+                      {walletData.solBalance.toFixed(4)} SOL
                     </p>
                     <p className="text-[10px] text-slate-500 uppercase font-label-sm">
-                      ≈ ${walletData.solValue.toLocaleString()}
+                      ≈ $
+                      {walletData.solValue.toLocaleString(undefined, {
+                        maximumFractionDigits: 2,
+                      })}
                     </p>
                   </div>
                 </div>
@@ -256,7 +356,10 @@ export default function WalletPage() {
                   </div>
                   <div>
                     <p className="text-data-mono font-data-mono text-white">
-                      {walletData.usdcBalance.toLocaleString()} USDC
+                      {walletData.usdcBalance.toLocaleString(undefined, {
+                        maximumFractionDigits: 2,
+                      })}{" "}
+                      USDC
                     </p>
                     <p className="text-[10px] text-slate-500 uppercase font-label-sm">
                       STABLE
@@ -392,7 +495,7 @@ export default function WalletPage() {
                         Solana (SOL)
                       </span>
                       <span className="text-white">
-                        {walletData.assetAllocation.sol}%
+                        {walletData.assetAllocation.sol.toFixed(1)}%
                       </span>
                     </div>
                     <div className="h-3 w-full bg-slate-800 rounded-full overflow-hidden">
@@ -408,7 +511,7 @@ export default function WalletPage() {
                         USDC Stablecoin
                       </span>
                       <span className="text-white">
-                        {walletData.assetAllocation.usdc}%
+                        {walletData.assetAllocation.usdc.toFixed(1)}%
                       </span>
                     </div>
                     <div className="h-3 w-full bg-slate-800 rounded-full overflow-hidden">
@@ -461,82 +564,90 @@ export default function WalletPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5">
-                {walletData.recentActivity.map((activity) => (
-                  <tr
-                    key={activity.id}
-                    className="hover:bg-white/5 transition-colors group"
-                  >
-                    <td className="px-8 py-5">
-                      <div className="flex items-center gap-4">
-                        <div
-                          className={`w-10 h-10 rounded-lg bg-surface-container flex items-center justify-center ${getTransactionColor(activity.type)}`}
-                        >
-                          <span className="material-symbols-outlined text-sm">
-                            {getTransactionIcon(activity.type)}
-                          </span>
-                        </div>
-                        <div>
-                          <p className="text-sm font-bold text-white">
-                            {activity.title}
-                          </p>
-                          <p className="text-xs text-slate-500">
-                            {activity.description}
-                          </p>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-8 py-5">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`material-symbols-outlined text-sm ${
-                            activity.status === "Settled"
-                              ? "text-secondary"
-                              : activity.status === "Processing"
-                                ? "text-yellow-500"
-                                : "text-slate-500"
-                          }`}
-                        >
-                          {getStatusIcon(activity.status)}
-                        </span>
-                        <span className="text-xs text-slate-400">
-                          {activity.status}
-                        </span>
-                      </div>
-                    </td>
-                    <td className="px-8 py-5 text-sm text-slate-400">
-                      {activity.date}
-                    </td>
-                    <td className="px-8 py-5">
-                      <span
-                        className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase ${
-                          activity.transactionType === "credit"
-                            ? "bg-secondary/10 text-secondary"
-                            : activity.transactionType === "debit"
-                              ? "bg-red-500/10 text-red-400"
-                              : "bg-primary/10 text-primary"
-                        }`}
-                      >
-                        {activity.transactionType}
-                      </span>
-                    </td>
-                    <td
-                      className={`px-8 py-5 text-right font-data-mono text-sm ${
-                        activity.transactionType === "credit"
-                          ? "text-secondary"
-                          : activity.transactionType === "debit"
-                            ? "text-red-400"
-                            : "text-white"
-                      }`}
-                    >
-                      {activity.transactionType === "credit"
-                        ? "+"
-                        : activity.transactionType === "debit"
-                          ? "-"
-                          : "≈"}
-                      ${Math.abs(activity.amount).toLocaleString()}
+                {walletData.recentActivity.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="text-center text-slate-500 py-12">
+                      No activity yet
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  walletData.recentActivity.map((activity) => (
+                    <tr
+                      key={activity.id}
+                      className="hover:bg-white/5 transition-colors group"
+                    >
+                      <td className="px-8 py-5">
+                        <div className="flex items-center gap-4">
+                          <div
+                            className={`w-10 h-10 rounded-lg bg-surface-container flex items-center justify-center ${getTransactionColor(activity.type)}`}
+                          >
+                            <span className="material-symbols-outlined text-sm">
+                              {getTransactionIcon(activity.type)}
+                            </span>
+                          </div>
+                          <div>
+                            <p className="text-sm font-bold text-white">
+                              {activity.title}
+                            </p>
+                            <p className="text-xs text-slate-500">
+                              {activity.description}
+                            </p>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-8 py-5">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`material-symbols-outlined text-sm ${
+                              activity.status === "Settled"
+                                ? "text-secondary"
+                                : activity.status === "Processing"
+                                  ? "text-yellow-500"
+                                  : "text-slate-500"
+                            }`}
+                          >
+                            {getStatusIcon(activity.status)}
+                          </span>
+                          <span className="text-xs text-slate-400">
+                            {activity.status}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-8 py-5 text-sm text-slate-400">
+                        {activity.date}
+                      </td>
+                      <td className="px-8 py-5">
+                        <span
+                          className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase ${
+                            activity.transactionType === "credit"
+                              ? "bg-secondary/10 text-secondary"
+                              : activity.transactionType === "debit"
+                                ? "bg-red-500/10 text-red-400"
+                                : "bg-primary/10 text-primary"
+                          }`}
+                        >
+                          {activity.transactionType}
+                        </span>
+                      </td>
+                      <td
+                        className={`px-8 py-5 text-right font-data-mono text-sm ${
+                          activity.transactionType === "credit"
+                            ? "text-secondary"
+                            : activity.transactionType === "debit"
+                              ? "text-red-400"
+                              : "text-white"
+                        }`}
+                      >
+                        {activity.transactionType === "credit"
+                          ? "+"
+                          : activity.transactionType === "debit"
+                            ? "-"
+                            : "≈"}
+                        ${Math.abs(activity.amount).toLocaleString()}
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
@@ -566,14 +677,20 @@ export default function WalletPage() {
               <div className="bg-primary-container/10 rounded-xl p-4 border border-primary-container/20">
                 <p className="text-sm text-slate-400 mb-1">Available Balance</p>
                 <p className="text-2xl font-bold text-white">
-                  ${walletData.totalBalance.toLocaleString()}
+                  $
+                  {walletData.totalBalance.toLocaleString(undefined, {
+                    maximumFractionDigits: 2,
+                  })}
                 </p>
                 <div className="flex gap-3 mt-2">
                   <p className="text-xs text-slate-500">
-                    {walletData.solBalance} SOL
+                    {walletData.solBalance.toFixed(4)} SOL
                   </p>
                   <p className="text-xs text-slate-500">
-                    {walletData.usdcBalance.toLocaleString()} USDC
+                    {walletData.usdcBalance.toLocaleString(undefined, {
+                      maximumFractionDigits: 2,
+                    })}{" "}
+                    USDC
                   </p>
                 </div>
               </div>
@@ -622,7 +739,10 @@ export default function WalletPage() {
                   className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary"
                 />
                 <p className="text-xs text-slate-500 mt-1">
-                  Min: $10 • Max: ${walletData.totalBalance.toLocaleString()}
+                  Min: $10 • Max: $
+                  {walletData.totalBalance.toLocaleString(undefined, {
+                    maximumFractionDigits: 2,
+                  })}
                 </p>
               </div>
 
@@ -632,8 +752,6 @@ export default function WalletPage() {
                     Bank Account
                   </label>
                   <select className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary">
-                    <option>Chase Bank (****4829)</option>
-                    <option>Bank of America (****1234)</option>
                     <option>Add new bank account</option>
                   </select>
                 </div>
@@ -738,11 +856,20 @@ export default function WalletPage() {
                 <p className="text-white font-semibold">Solana (SOL) Network</p>
                 <p className="text-xs text-slate-500 mt-2">Deposit address:</p>
                 <p className="text-xs font-mono text-primary break-all mt-1">
-                  9njVeTjPJrBRQCnDPejVViijMq6pNMDVjoRaqBZRvwYP
+                  {walletData.walletAddress ||
+                    "Add a Solana wallet in Settings to get a deposit address"}
                 </p>
-                <button className="mt-2 text-xs text-primary hover:underline">
-                  Copy Address
-                </button>
+                {walletData.walletAddress && (
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(walletData.walletAddress!);
+                      alert("Address copied!");
+                    }}
+                    className="mt-2 text-xs text-primary hover:underline"
+                  >
+                    Copy Address
+                  </button>
+                )}
               </div>
 
               <div className="flex gap-3">

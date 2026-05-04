@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
+import AuthButton from "@/components/AuthButton";
 
 interface DashboardStats {
   availableLiquidity: number;
@@ -39,8 +40,19 @@ export default function CreatorDashboard() {
   const [loading, setLoading] = useState(true);
   const [showAdvanceModal, setShowAdvanceModal] = useState(false);
   const [selectedInvoice, setSelectedInvoice] = useState<any>(null);
+  const [searchQuery, setSearchQuery] = useState("");
 
   const supabase = createClient();
+
+  const filteredTransactions = recentTransactions.filter((tx) => {
+    if (!searchQuery.trim()) return true;
+    const q = searchQuery.toLowerCase();
+    return (
+      tx.deal_name?.toLowerCase().includes(q) ||
+      tx.type.toLowerCase().includes(q) ||
+      tx.status.toLowerCase().includes(q)
+    );
+  });
 
   useEffect(() => {
     fetchDashboardData();
@@ -113,10 +125,12 @@ export default function CreatorDashboard() {
 
     if (payouts) {
       setUpcomingPayouts(
-        payouts.map((p) => ({
+        payouts.map((p: any) => ({
           id: p.id,
           deal_name: p.deal_name,
-          brand_name: p.brands?.company_name,
+          brand_name: Array.isArray(p.brands)
+            ? p.brands?.[0]?.company_name
+            : p.brands?.company_name,
           amount: p.amount,
           due_date: p.due_date,
           status: p.status,
@@ -142,13 +156,15 @@ export default function CreatorDashboard() {
 
     if (transactions) {
       setRecentTransactions(
-        transactions.map((t) => ({
+        transactions.map((t: any) => ({
           id: t.id,
           type: t.type,
           amount: t.amount,
           status: t.status,
           created_at: t.created_at,
-          deal_name: t.invoice?.deal_name,
+          deal_name: Array.isArray(t.invoice)
+            ? t.invoice?.[0]?.deal_name
+            : t.invoice?.deal_name,
         })),
       );
     }
@@ -248,6 +264,7 @@ export default function CreatorDashboard() {
             <span className="material-symbols-outlined">contact_support</span>
             <span>Support</span>
           </Link>
+          <AuthButton />
         </div>
       </aside>
 
@@ -260,6 +277,8 @@ export default function CreatorDashboard() {
             <input
               type="text"
               placeholder="Search transactions..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
               className="w-full bg-white/5 border-none rounded-full pl-10 pr-4 py-2 text-sm focus:ring-1 focus:ring-purple-500/50 text-slate-200 placeholder-slate-500 transition-all"
             />
           </div>
@@ -416,8 +435,12 @@ export default function CreatorDashboard() {
                 <p className="text-slate-500 text-center py-8">
                   No transactions yet
                 </p>
+              ) : filteredTransactions.length === 0 ? (
+                <p className="text-slate-500 text-center py-8">
+                  No transactions match &ldquo;{searchQuery}&rdquo;
+                </p>
               ) : (
-                recentTransactions.map((tx) => (
+                filteredTransactions.map((tx) => (
                   <div
                     key={tx.id}
                     className="flex items-center justify-between p-3 rounded-lg hover:bg-white/5"

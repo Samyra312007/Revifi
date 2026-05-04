@@ -1,88 +1,221 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
+import { createClient } from "@/lib/supabase/client";
+import AuthButton from "@/components/AuthButton";
+
+interface ActivityItem {
+  id: string;
+  type: string;
+  title: string;
+  description: string;
+  date: string;
+  status: "Settled" | "Processing" | "Completed";
+  amount: number;
+  platform: string;
+}
+
+interface AdvanceableInvoice {
+  id: string;
+  deal_name: string;
+  amount: number;
+}
+
+interface PaymentsData {
+  availableToAdvance: number;
+  activeAdvances: number;
+  repaymentProgress: number;
+  totalPaidMTD: number;
+  monthlyGrowth: number;
+  recentActivity: ActivityItem[];
+  advanceableInvoices: AdvanceableInvoice[];
+  platforms: { name: string; icon: string; connected: boolean; limit: number }[];
+}
+
+const DEFAULT_DATA: PaymentsData = {
+  availableToAdvance: 0,
+  activeAdvances: 0,
+  repaymentProgress: 0,
+  totalPaidMTD: 0,
+  monthlyGrowth: 0,
+  recentActivity: [],
+  advanceableInvoices: [],
+  platforms: [
+    { name: "YouTube", icon: "smart_display", connected: false, limit: 25000 },
+    { name: "Twitch", icon: "stadia_controller", connected: false, limit: 15000 },
+    { name: "Instagram", icon: "photo_camera", connected: false, limit: 20000 },
+    { name: "TikTok", icon: "music_note", connected: false, limit: 18000 },
+  ],
+};
 
 export default function PaymentsPage() {
   const [showAdvanceModal, setShowAdvanceModal] = useState(false);
   const [showConnectModal, setShowConnectModal] = useState(false);
   const [selectedPlatform, setSelectedPlatform] = useState<string | null>(null);
+  const [paymentsData, setPaymentsData] = useState<PaymentsData>(DEFAULT_DATA);
+  const [loading, setLoading] = useState(true);
+  const [authed, setAuthed] = useState(false);
+  const [selectedInvoiceId, setSelectedInvoiceId] = useState<string>("");
+  const [advanceAmountInput, setAdvanceAmountInput] = useState<string>("");
+  const [submitting, setSubmitting] = useState(false);
+  const supabase = createClient();
 
-  const paymentsData = {
-    availableToAdvance: 12450,
-    activeAdvances: 4200,
-    repaymentProgress: 65,
-    totalPaidMTD: 28910.82,
-    monthlyGrowth: 12.4,
-    recentActivity: [
-      {
-        id: 1,
-        type: "payment",
-        title: "YouTube Adsense Payment",
-        description: "Ad revenue share Jan 2024",
-        date: "Feb 24, 2024",
-        status: "Settled",
-        amount: 8420,
-        platform: "youtube",
-      },
-      {
-        id: 2,
-        type: "advance",
-        title: "Instant Advance Payout",
-        description: "Liquidity request #ADV-9021",
-        date: "Feb 22, 2024",
-        status: "Settled",
-        amount: 2500,
-        platform: "revifi",
-      },
-      {
-        id: 3,
-        type: "repayment",
-        title: "Advance Repayment",
-        description: "Automatic deduction (15%)",
-        date: "Feb 21, 2024",
-        status: "Processing",
-        amount: -1263,
-        platform: "revifi",
-      },
-      {
-        id: 4,
-        type: "payment",
-        title: "Twitch Subscription Payout",
-        description: "Monthly sub revenue",
-        date: "Feb 18, 2024",
-        status: "Settled",
-        amount: 1840.5,
-        platform: "twitch",
-      },
-      {
-        id: 5,
-        type: "advance",
-        title: "Sponsorship Advance",
-        description: "Liquidity request #ADV-8891",
-        date: "Feb 15, 2024",
-        status: "Completed",
-        amount: 5000,
-        platform: "revifi",
-      },
-    ],
-    platforms: [
-      { name: "YouTube", icon: "smart_display", connected: true, limit: 25000 },
-      {
-        name: "Twitch",
-        icon: "stadia_controller",
-        connected: true,
-        limit: 15000,
-      },
-      {
-        name: "Instagram",
-        icon: "photo_camera",
-        connected: false,
-        limit: 20000,
-      },
-      { name: "TikTok", icon: "music_note", connected: false, limit: 18000 },
-    ],
-  };
+  useEffect(() => {
+    fetchPaymentsData();
+  }, []);
+
+  async function fetchPaymentsData() {
+    setLoading(true);
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      setAuthed(false);
+      setPaymentsData(DEFAULT_DATA);
+      setLoading(false);
+      return;
+    }
+    setAuthed(true);
+
+    const { data: creator } = await supabase
+      .from("creators")
+      .select("*")
+      .eq("user_id", user.id)
+      .single();
+
+    if (!creator) {
+      setPaymentsData(DEFAULT_DATA);
+      setLoading(false);
+      return;
+    }
+
+    const { data: invoices } = await supabase
+      .from("invoices")
+      .select("*")
+      .eq("creator_id", creator.id);
+
+    const { data: transactions } = await supabase
+      .from("transactions")
+      .select("id, type, amount, status, created_at, metadata, invoice:invoices(deal_name)")
+      .eq("user_id", user.id)
+      .order("created_at", { ascending: false })
+      .limit(10);
+
+    const advanceableInvoices: AdvanceableInvoice[] = (invoices || [])
+      .filter((i) => i.status === "paid_to_escrow")
+      .map((i) => ({ id: i.id, deal_name: i.deal_name, amount: i.amount }));
+
+    const availableToAdvance = advanceableInvoices.reduce(
+      (sum, i) => sum + Number(i.amount || 0),
+      0,
+    );
+
+    const activeAdvances =
+      invoices
+        ?.filter((i) => i.status === "factored")
+        .reduce((sum, i) => sum + Number(i.advance_amount || 0), 0) || 0;
+
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const totalPaidMTD =
+      transactions
+        ?.filter(
+          (t) =>
+            t.type === "payment" &&
+            t.status === "completed" &&
+            new Date(t.created_at) >= startOfMonth,
+        )
+        .reduce((sum, t) => sum + Number(t.amount || 0), 0) || 0;
+
+    const recentActivity: ActivityItem[] = (transactions || []).map((t: any) => {
+      const dealName: string | undefined = Array.isArray(t.invoice)
+        ? t.invoice?.[0]?.deal_name
+        : t.invoice?.deal_name;
+      const description = t.metadata?.description || dealName || "Transaction";
+      const title =
+        t.type === "payment"
+          ? "Payment Received"
+          : t.type === "advance"
+            ? "Instant Advance Payout"
+            : t.type === "repayment"
+              ? "Advance Repayment"
+              : "Transaction";
+      const status: ActivityItem["status"] =
+        t.status === "completed"
+          ? "Settled"
+          : t.status === "pending"
+            ? "Processing"
+            : "Completed";
+      return {
+        id: t.id,
+        type: t.type,
+        title,
+        description,
+        date: new Date(t.created_at).toLocaleDateString(),
+        status,
+        amount: t.type === "repayment" ? -Math.abs(Number(t.amount)) : Number(t.amount),
+        platform: t.type === "advance" || t.type === "repayment" ? "revifi" : "brand",
+      };
+    });
+
+    setPaymentsData({
+      availableToAdvance,
+      activeAdvances,
+      repaymentProgress:
+        activeAdvances > 0 ? Math.min(95, Math.round((activeAdvances / 10000) * 100)) : 0,
+      totalPaidMTD,
+      monthlyGrowth: 12.4,
+      recentActivity,
+      advanceableInvoices,
+      platforms: DEFAULT_DATA.platforms,
+    });
+
+    setLoading(false);
+  }
+
+  async function requestAdvance() {
+    if (!selectedInvoiceId) {
+      alert("Please select an invoice");
+      return;
+    }
+    const invoice = paymentsData.advanceableInvoices.find((i) => i.id === selectedInvoiceId);
+    if (!invoice) return;
+
+    const requestedAmount = Number(advanceAmountInput) || invoice.amount;
+    if (requestedAmount <= 0 || requestedAmount > invoice.amount) {
+      alert(`Amount must be between 1 and ${invoice.amount}`);
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const response = await fetch("/api/advances/request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          invoice_id: selectedInvoiceId,
+          advance_amount: requestedAmount,
+        }),
+      });
+      const result = await response.json();
+      if (result.success) {
+        alert(`Advance approved! Fee: $${result.fee.toFixed(2)}`);
+        setShowAdvanceModal(false);
+        setSelectedInvoiceId("");
+        setAdvanceAmountInput("");
+        fetchPaymentsData();
+      } else {
+        alert("Failed: " + (result.error || "Unknown error"));
+      }
+    } catch (error) {
+      console.error("Advance request error:", error);
+      alert("An error occurred. Please try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
 
   const getStatusBadge = (status: string) => {
     const colors = {
@@ -93,16 +226,16 @@ export default function PaymentsPage() {
     return `inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-[10px] font-bold ${colors[status as keyof typeof colors] || colors.Settled}`;
   };
 
-  const getPlatformIcon = (platform: string) => {
-    const icons: Record<string, string> = {
-      youtube: "smart_display",
-      twitch: "stadia_controller",
-      instagram: "photo_camera",
-      tiktok: "music_note",
-      revifi: "bolt",
-    };
-    return icons[platform] || "payments";
-  };
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
+          <p className="text-slate-400">Loading payments...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background">
@@ -167,6 +300,7 @@ export default function PaymentsPage() {
             <span className="material-symbols-outlined">contact_support</span>
             <span>Support</span>
           </Link>
+          <AuthButton />
         </div>
       </aside>
 
@@ -203,6 +337,14 @@ export default function PaymentsPage() {
 
       <main className="ml-64 p-8 min-h-screen bg-background">
         <div className="max-w-6xl mx-auto space-y-8">
+          {!authed && (
+            <div className="glass-card rounded-xl p-6 border border-yellow-500/20 bg-yellow-500/5">
+              <p className="text-yellow-400 text-sm">
+                Sign in to see your real payments data.
+              </p>
+            </div>
+          )}
+
           <div className="flex justify-between items-end">
             <div>
               <h1 className="font-headline-lg text-white">
@@ -242,9 +384,6 @@ export default function PaymentsPage() {
                   <span className="font-display-xl text-white">
                     ${paymentsData.availableToAdvance.toLocaleString()}
                   </span>
-                  <span className="font-data-mono text-slate-500 text-sm">
-                    .00
-                  </span>
                 </div>
               </div>
               <div className="mt-4 pt-4 border-t border-white/5 flex items-center justify-between">
@@ -271,9 +410,6 @@ export default function PaymentsPage() {
               <div className="flex items-baseline gap-2">
                 <span className="font-display-xl text-white">
                   ${paymentsData.activeAdvances.toLocaleString()}
-                </span>
-                <span className="font-data-mono text-slate-500 text-sm">
-                  .00
                 </span>
               </div>
               <div className="mt-6">
@@ -304,9 +440,6 @@ export default function PaymentsPage() {
               <div className="flex items-baseline gap-2">
                 <span className="font-display-xl text-white">
                   ${paymentsData.totalPaidMTD.toLocaleString()}
-                </span>
-                <span className="font-data-mono text-slate-500 text-sm">
-                  .82
                 </span>
               </div>
               <div className="mt-4 pt-4 border-t border-white/5">
@@ -356,69 +489,77 @@ export default function PaymentsPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/5">
-                    {paymentsData.recentActivity.map((activity) => (
-                      <tr
-                        key={activity.id}
-                        className="hover:bg-white/5 transition-colors group"
-                      >
-                        <td className="px-6 py-4">
-                          <div className="flex items-center gap-3">
-                            <div
-                              className={`w-10 h-10 rounded-lg flex items-center justify-center ${
-                                activity.type === "payment"
-                                  ? "bg-purple-500/10 text-primary"
-                                  : activity.type === "advance"
-                                    ? "bg-secondary/10 text-secondary"
-                                    : "bg-white/5 text-slate-400"
-                              }`}
-                            >
-                              <span className="material-symbols-outlined text-sm">
-                                {activity.type === "payment"
-                                  ? "input"
-                                  : activity.type === "advance"
-                                    ? "bolt"
-                                    : "output"}
-                              </span>
-                            </div>
-                            <div>
-                              <p className="text-sm font-semibold text-white">
-                                {activity.title}
-                              </p>
-                              <p className="text-xs text-slate-500">
-                                {activity.description}
-                              </p>
-                            </div>
-                          </div>
-                        </td>
-                        <td className="px-6 py-4 font-data-mono text-xs text-slate-400">
-                          {activity.date}
-                        </td>
-                        <td className="px-6 py-4">
-                          <span className={getStatusBadge(activity.status)}>
-                            <span
-                              className={`w-1.5 h-1.5 rounded-full ${
-                                activity.status === "Settled"
-                                  ? "bg-secondary"
-                                  : activity.status === "Processing"
-                                    ? "bg-slate-500"
-                                    : "bg-primary"
-                              }`}
-                            ></span>
-                            {activity.status}
-                          </span>
-                        </td>
-                        <td
-                          className={`px-6 py-4 text-right font-data-mono text-sm ${
-                            activity.amount < 0
-                              ? "text-slate-400"
-                              : "text-white"
-                          }`}
-                        >
-                          {activity.amount < 0 ? "-" : "+"}$
-                          {Math.abs(activity.amount).toLocaleString()}
+                    {paymentsData.recentActivity.length === 0 ? (
+                      <tr>
+                        <td colSpan={4} className="text-center text-slate-500 py-12">
+                          No recent activity yet
                         </td>
                       </tr>
-                    ))}
+                    ) : (
+                      paymentsData.recentActivity.map((activity) => (
+                        <tr
+                          key={activity.id}
+                          className="hover:bg-white/5 transition-colors group"
+                        >
+                          <td className="px-6 py-4">
+                            <div className="flex items-center gap-3">
+                              <div
+                                className={`w-10 h-10 rounded-lg flex items-center justify-center ${
+                                  activity.type === "payment"
+                                    ? "bg-purple-500/10 text-primary"
+                                    : activity.type === "advance"
+                                      ? "bg-secondary/10 text-secondary"
+                                      : "bg-white/5 text-slate-400"
+                                }`}
+                              >
+                                <span className="material-symbols-outlined text-sm">
+                                  {activity.type === "payment"
+                                    ? "input"
+                                    : activity.type === "advance"
+                                      ? "bolt"
+                                      : "output"}
+                                </span>
+                              </div>
+                              <div>
+                                <p className="text-sm font-semibold text-white">
+                                  {activity.title}
+                                </p>
+                                <p className="text-xs text-slate-500">
+                                  {activity.description}
+                                </p>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="px-6 py-4 font-data-mono text-xs text-slate-400">
+                            {activity.date}
+                          </td>
+                          <td className="px-6 py-4">
+                            <span className={getStatusBadge(activity.status)}>
+                              <span
+                                className={`w-1.5 h-1.5 rounded-full ${
+                                  activity.status === "Settled"
+                                    ? "bg-secondary"
+                                    : activity.status === "Processing"
+                                      ? "bg-slate-500"
+                                      : "bg-primary"
+                                }`}
+                              ></span>
+                              {activity.status}
+                            </span>
+                          </td>
+                          <td
+                            className={`px-6 py-4 text-right font-data-mono text-sm ${
+                              activity.amount < 0
+                                ? "text-slate-400"
+                                : "text-white"
+                            }`}
+                          >
+                            {activity.amount < 0 ? "-" : "+"}$
+                            {Math.abs(activity.amount).toLocaleString()}
+                          </td>
+                        </tr>
+                      ))
+                    )}
                   </tbody>
                 </table>
                 <div className="p-4 flex justify-center border-t border-white/5">
@@ -446,8 +587,7 @@ export default function PaymentsPage() {
                       <div
                         key={platform.name}
                         onClick={() =>
-                          !platform.connected &&
-                          setSelectedPlatform(platform.name)
+                          !platform.connected && setSelectedPlatform(platform.name)
                         }
                         className={`flex items-center gap-4 p-3 rounded-lg border transition-colors cursor-pointer ${
                           platform.connected
@@ -474,9 +614,7 @@ export default function PaymentsPage() {
                           Connect {platform.name}
                         </span>
                         {platform.connected ? (
-                          <span className="text-xs text-secondary">
-                            Connected
-                          </span>
+                          <span className="text-xs text-secondary">Connected</span>
                         ) : (
                           <span className="material-symbols-outlined text-xs text-slate-500">
                             add
@@ -542,7 +680,7 @@ export default function PaymentsPage() {
                   ${paymentsData.availableToAdvance.toLocaleString()}
                 </p>
                 <p className="text-xs text-secondary-container mt-2">
-                  Fee: 1.2% • Instant settlement
+                  Fee: 5% • Instant settlement on Solana
                 </p>
               </div>
 
@@ -550,11 +688,29 @@ export default function PaymentsPage() {
                 <label className="block text-sm font-medium text-slate-300 mb-2">
                   Select Invoice
                 </label>
-                <select className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary">
-                  <option>YouTube Partner Program - $8,900</option>
-                  <option>Instagram Sponsorship - $12,450</option>
-                  <option>TikTok Creator Fund - $4,200</option>
+                <select
+                  value={selectedInvoiceId}
+                  onChange={(e) => {
+                    setSelectedInvoiceId(e.target.value);
+                    const inv = paymentsData.advanceableInvoices.find(
+                      (i) => i.id === e.target.value,
+                    );
+                    setAdvanceAmountInput(inv ? String(inv.amount) : "");
+                  }}
+                  className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary"
+                >
+                  <option value="">Select an invoice...</option>
+                  {paymentsData.advanceableInvoices.map((inv) => (
+                    <option key={inv.id} value={inv.id}>
+                      {inv.deal_name} - ${Number(inv.amount).toLocaleString()}
+                    </option>
+                  ))}
                 </select>
+                {paymentsData.advanceableInvoices.length === 0 && (
+                  <p className="text-xs text-slate-500 mt-2">
+                    No invoices available for advance yet.
+                  </p>
+                )}
               </div>
 
               <div>
@@ -563,6 +719,8 @@ export default function PaymentsPage() {
                 </label>
                 <input
                   type="number"
+                  value={advanceAmountInput}
+                  onChange={(e) => setAdvanceAmountInput(e.target.value)}
                   placeholder="Enter amount"
                   className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary"
                 />
@@ -579,13 +737,11 @@ export default function PaymentsPage() {
                   Cancel
                 </button>
                 <button
-                  onClick={() => {
-                    setShowAdvanceModal(false);
-                    alert("Advance request submitted successfully!");
-                  }}
-                  className="flex-1 bg-gradient-to-r from-primary-container to-inverse-primary text-white py-3 rounded-lg hover:brightness-110 transition-all font-semibold"
+                  onClick={requestAdvance}
+                  disabled={submitting || !selectedInvoiceId}
+                  className="flex-1 bg-gradient-to-r from-primary-container to-inverse-primary text-white py-3 rounded-lg hover:brightness-110 transition-all font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Confirm Advance
+                  {submitting ? "Processing..." : "Confirm Advance"}
                 </button>
               </div>
             </div>
@@ -648,9 +804,7 @@ export default function PaymentsPage() {
                     </span>
                   </div>
                   <div className="flex-1 text-left">
-                    <p className="font-semibold text-white">
-                      Connect X / Twitter
-                    </p>
+                    <p className="font-semibold text-white">Connect X / Twitter</p>
                     <p className="text-xs text-slate-500">
                       Verify engagement metrics
                     </p>

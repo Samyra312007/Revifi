@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import AuthButton from "@/components/AuthButton";
 
 export default function DealsPage() {
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -178,6 +179,7 @@ export default function DealsPage() {
             <span className="material-symbols-outlined">contact_support</span>
             <span>Support</span>
           </Link>
+          <AuthButton />
         </div>
       </aside>
 
