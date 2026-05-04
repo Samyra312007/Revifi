@@ -5,6 +5,8 @@ import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
 import AuthButton from "@/components/AuthButton";
+import NotificationBell from "@/components/NotificationBell";
+import PhantomConnect from "@/components/PhantomConnect";
 
 export default function SettingsPage() {
   const [user, setUser] = useState<any>(null);
@@ -161,13 +163,16 @@ export default function SettingsPage() {
 
       <header className="h-16 ml-64 bg-slate-950/80 backdrop-blur-xl border-b border-slate-800 sticky top-0 z-40 flex justify-between items-center px-8">
         <h1 className="text-xl font-semibold text-white">Settings</h1>
-        <button
-          onClick={updateProfile}
-          disabled={saving}
-          className="bg-primary-container text-white px-4 py-2 rounded-lg text-sm font-semibold hover:opacity-90 disabled:opacity-50 transition-all"
-        >
-          {saving ? "Saving..." : "Save Changes"}
-        </button>
+        <div className="flex items-center gap-4">
+          <NotificationBell />
+          <button
+            onClick={updateProfile}
+            disabled={saving}
+            className="bg-primary-container text-white px-4 py-2 rounded-lg text-sm font-semibold hover:opacity-90 disabled:opacity-50 transition-all"
+          >
+            {saving ? "Saving..." : "Save Changes"}
+          </button>
+        </div>
       </header>
 
       <main className="ml-64 p-8">
@@ -216,6 +221,19 @@ export default function SettingsPage() {
                 <p className="text-xs text-slate-500 mt-1">
                   This is where your advances will be sent
                 </p>
+
+                <div className="mt-4 flex items-center gap-3">
+                  <PhantomConnect
+                    initialAddress={solanaWallet || null}
+                    onChange={(addr) => {
+                      setSolanaWallet(addr || "");
+                      fetchProfile();
+                    }}
+                  />
+                  <p className="text-xs text-slate-500">
+                    Or connect Phantom to fill this automatically
+                  </p>
+                </div>
               </div>
 
               <button

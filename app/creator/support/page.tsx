@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import AuthButton from "@/components/AuthButton";
+import NotificationBell from "@/components/NotificationBell";
 
 export default function SupportPage() {
   const [message, setMessage] = useState("");
@@ -120,6 +121,7 @@ export default function SupportPage() {
 
       <header className="h-16 ml-64 bg-slate-950/80 backdrop-blur-xl border-b border-slate-800 sticky top-0 z-40 flex justify-between items-center px-8">
         <h1 className="text-xl font-semibold text-white">Support Center</h1>
+        <NotificationBell />
       </header>
 
       <main className="ml-64 p-8">

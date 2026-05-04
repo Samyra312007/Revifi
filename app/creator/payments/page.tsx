@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import AuthButton from "@/components/AuthButton";
+import NotificationBell from "@/components/NotificationBell";
+import { downloadCsv } from "@/lib/csv";
 
 interface ActivityItem {
   id: string;
@@ -62,8 +64,58 @@ export default function PaymentsPage() {
   const supabase = createClient();
 
   useEffect(() => {
+    let invoiceChannel: ReturnType<typeof supabase.channel> | null = null;
+    let txChannel: ReturnType<typeof supabase.channel> | null = null;
     fetchPaymentsData();
+
+    (async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+
+      invoiceChannel = supabase
+        .channel("payments_invoices_changes")
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "invoices" },
+          () => fetchPaymentsData(),
+        )
+        .subscribe();
+
+      txChannel = supabase
+        .channel(`payments_tx_${user.id}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "transactions",
+            filter: `user_id=eq.${user.id}`,
+          },
+          () => fetchPaymentsData(),
+        )
+        .subscribe();
+    })();
+
+    return () => {
+      if (invoiceChannel) supabase.removeChannel(invoiceChannel);
+      if (txChannel) supabase.removeChannel(txChannel);
+    };
   }, []);
+
+  function exportActivityCsv() {
+    const rows = paymentsData.recentActivity.map((a) => ({
+      id: a.id,
+      type: a.type,
+      title: a.title,
+      description: a.description,
+      date: a.date,
+      status: a.status,
+      amount_usd: a.amount,
+    }));
+    downloadCsv(rows, `revifi-payments-${Date.now()}.csv`);
+  }
 
   async function fetchPaymentsData() {
     setLoading(true);
@@ -319,12 +371,13 @@ export default function PaymentsPage() {
         </div>
 
         <div className="flex items-center gap-4">
-          <button className="hover:bg-white/5 rounded-full p-2 transition-all text-slate-400 relative">
-            <span className="material-symbols-outlined">notifications</span>
-            <span className="absolute top-2 right-2 w-2 h-2 bg-purple-500 rounded-full border-2 border-slate-950"></span>
-          </button>
-          <button className="hover:bg-white/5 rounded-full p-2 transition-all text-slate-400">
-            <span className="material-symbols-outlined">history</span>
+          <NotificationBell />
+          <button
+            onClick={exportActivityCsv}
+            className="hover:bg-white/5 rounded-full p-2 transition-all text-slate-400"
+            title="Download CSV"
+          >
+            <span className="material-symbols-outlined">download</span>
           </button>
           <button
             onClick={() => setShowAdvanceModal(true)}
@@ -563,8 +616,11 @@ export default function PaymentsPage() {
                   </tbody>
                 </table>
                 <div className="p-4 flex justify-center border-t border-white/5">
-                  <button className="text-xs font-bold text-primary hover:underline transition-all">
-                    View all history
+                  <button
+                    onClick={exportActivityCsv}
+                    className="text-xs font-bold text-primary hover:underline transition-all"
+                  >
+                    Download history (CSV)
                   </button>
                 </div>
               </div>

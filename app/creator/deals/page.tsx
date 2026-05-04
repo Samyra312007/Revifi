@@ -1,111 +1,295 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { createClient } from "@/lib/supabase/client";
 import AuthButton from "@/components/AuthButton";
+import NotificationBell from "@/components/NotificationBell";
+
+interface Brand {
+  id: string;
+  company_name: string;
+}
+
+interface Deal {
+  id: string;
+  name: string;
+  contractId: string;
+  client: string;
+  totalValue: number;
+  deadline: string;
+  status: "Active" | "In Review" | "Completed" | "Cancelled" | "Pending";
+  statusColor: "primary" | "secondary" | "error";
+  milestone: string;
+  progress: number;
+  icon: string;
+  rawStatus: string;
+  amount: number;
+}
+
+function statusToDisplay(status: string): {
+  label: Deal["status"];
+  color: Deal["statusColor"];
+  progress: number;
+  icon: string;
+  milestone: string;
+} {
+  switch (status) {
+    case "paid_to_escrow":
+      return {
+        label: "In Review",
+        color: "secondary",
+        progress: 85,
+        icon: "rocket_launch",
+        milestone: "Awaiting Settlement",
+      };
+    case "factored":
+      return {
+        label: "Active",
+        color: "primary",
+        progress: 60,
+        icon: "bolt",
+        milestone: "Advance Issued",
+      };
+    case "settled":
+      return {
+        label: "Completed",
+        color: "secondary",
+        progress: 100,
+        icon: "diamond",
+        milestone: "Settled",
+      };
+    case "expired":
+    case "cancelled":
+      return {
+        label: "Cancelled",
+        color: "error",
+        progress: 30,
+        icon: "cancel",
+        milestone: "Closed",
+      };
+    case "pending":
+    default:
+      return {
+        label: "Pending",
+        color: "primary",
+        progress: 15,
+        icon: "campaign",
+        milestone: "Awaiting Payment",
+      };
+  }
+}
 
 export default function DealsPage() {
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [filterStatus, setFilterStatus] = useState("all");
+  const [filterStatus, setFilterStatus] = useState<string>("all");
+  const [deals, setDeals] = useState<Deal[]>([]);
+  const [brands, setBrands] = useState<Brand[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [authed, setAuthed] = useState(false);
+  const [creatorId, setCreatorId] = useState<string | null>(null);
 
-  const dealsData = {
-    activePipeline: 142850.0,
-    growth: 12.5,
-    pipelineProgress: 68,
-    deals: [
-      {
-        id: 1,
-        name: "Project Nebula Review",
-        contractId: "RV-00921",
-        client: "Nebula Tech Systems",
-        totalValue: 24500,
-        deadline: "Oct 24, 2024",
-        status: "In Review",
-        statusColor: "secondary",
-        milestone: "Script Approval",
-        progress: 85,
-        icon: "rocket_launch",
-      },
-      {
-        id: 2,
-        name: "Summer Gear Drop",
-        contractId: "RV-01242",
-        client: "Waveform Apparel",
-        totalValue: 12000,
-        deadline: "Nov 12, 2024",
-        status: "Active",
-        statusColor: "primary",
-        milestone: "Content Production",
-        progress: 40,
-        icon: "tsunami",
-      },
-      {
-        id: 3,
-        name: "Long-term Ambassadorship",
-        contractId: "RV-00891",
-        client: "Aura Energy Drink",
-        totalValue: 85000,
-        deadline: "Sep 15, 2024",
-        status: "Completed",
-        statusColor: "secondary",
-        milestone: "Final Delivery",
-        progress: 100,
-        icon: "diamond",
-      },
-      {
-        id: 4,
-        name: "Autumn Campaign V2",
-        contractId: "RV-01123",
-        client: "Lume Lighting",
-        totalValue: 4200,
-        deadline: "Aug 28, 2024",
-        status: "Completed",
-        statusColor: "secondary",
-        milestone: "Campaign Launch",
-        progress: 100,
-        icon: "campaign",
-      },
-      {
-        id: 5,
-        name: "Product Integration #4",
-        contractId: "RV-00765",
-        client: "Zenith Keyboards",
-        totalValue: 1850,
-        deadline: "Aug 12, 2024",
-        status: "Cancelled",
-        statusColor: "error",
-        milestone: "Integration Testing",
-        progress: 30,
-        icon: "integration_instructions",
-      },
-    ],
-    recentActivity: [
-      {
-        id: 1,
-        name: "Long-term Ambassadorship",
-        counterparty: "Aura Energy Drink",
-        date: "Sep 15, 2024",
-        amount: 85000,
-        status: "Settled",
-      },
-      {
-        id: 2,
-        name: "Autumn Campaign V2",
-        counterparty: "Lume Lighting",
-        date: "Aug 28, 2024",
-        amount: 4200,
-        status: "Settled",
-      },
-      {
-        id: 3,
-        name: "Product Integration #4",
-        counterparty: "Zenith Keyboards",
-        date: "Aug 12, 2024",
-        amount: 1850,
-        status: "Cancelled",
-      },
-    ],
-  };
+  const [form, setForm] = useState({
+    deal_name: "",
+    brand_id: "",
+    new_brand_name: "",
+    amount: "",
+    due_date: "",
+  });
+  const [submitting, setSubmitting] = useState(false);
+
+  const supabase = createClient();
+
+  useEffect(() => {
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+    (async () => {
+      await fetchData();
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+
+      channel = supabase
+        .channel("deals_invoices_changes")
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "invoices" },
+          () => fetchData(),
+        )
+        .subscribe();
+    })();
+    return () => {
+      if (channel) supabase.removeChannel(channel);
+    };
+  }, []);
+
+  async function fetchData() {
+    setLoading(true);
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      setAuthed(false);
+      setDeals([]);
+      setLoading(false);
+      return;
+    }
+    setAuthed(true);
+
+    const { data: creator } = await supabase
+      .from("creators")
+      .select("*")
+      .eq("user_id", user.id)
+      .single();
+
+    if (!creator) {
+      setDeals([]);
+      setLoading(false);
+      return;
+    }
+    setCreatorId(creator.id);
+
+    const { data: brandList } = await supabase
+      .from("brands")
+      .select("id, company_name")
+      .order("company_name", { ascending: true });
+    setBrands((brandList as Brand[]) || []);
+
+    const { data: invoices } = await supabase
+      .from("invoices")
+      .select("*, brands:brand_id(company_name)")
+      .eq("creator_id", creator.id)
+      .order("created_at", { ascending: false });
+
+    const mapped: Deal[] = (invoices || []).map((inv: any) => {
+      const display = statusToDisplay(inv.status);
+      const brandName = Array.isArray(inv.brands)
+        ? inv.brands?.[0]?.company_name
+        : inv.brands?.company_name;
+      return {
+        id: inv.id,
+        name: inv.deal_name || "Untitled Deal",
+        contractId: `RV-${String(inv.id).slice(0, 5).toUpperCase()}`,
+        client: brandName || "—",
+        totalValue: Number(inv.amount || 0),
+        amount: Number(inv.amount || 0),
+        deadline: inv.due_date
+          ? new Date(inv.due_date).toLocaleDateString()
+          : "No deadline",
+        status: display.label,
+        statusColor: display.color,
+        milestone: display.milestone,
+        progress: display.progress,
+        icon: display.icon,
+        rawStatus: inv.status,
+      };
+    });
+
+    setDeals(mapped);
+    setLoading(false);
+  }
+
+  const filteredDeals = useMemo(() => {
+    if (filterStatus === "all") return deals;
+    return deals.filter((d) => d.status.toLowerCase() === filterStatus);
+  }, [deals, filterStatus]);
+
+  const recentActivity = useMemo(() => {
+    return deals.slice(0, 5).map((d) => ({
+      id: d.id,
+      name: d.name,
+      counterparty: d.client,
+      date: d.deadline,
+      amount: d.totalValue,
+      status: d.status,
+    }));
+  }, [deals]);
+
+  const activePipeline = useMemo(
+    () =>
+      deals
+        .filter((d) => d.status !== "Completed" && d.status !== "Cancelled")
+        .reduce((sum, d) => sum + d.totalValue, 0),
+    [deals],
+  );
+  const pipelineProgress = useMemo(() => {
+    if (deals.length === 0) return 0;
+    const totalProgress = deals.reduce((sum, d) => sum + d.progress, 0);
+    return Math.round(totalProgress / deals.length);
+  }, [deals]);
+
+  async function createDeal() {
+    if (!form.deal_name.trim() || !form.amount || !form.due_date) {
+      alert("Please fill in deal name, amount, and deadline.");
+      return;
+    }
+    if (!creatorId) {
+      alert("Creator profile not found. Please complete onboarding first.");
+      return;
+    }
+
+    let brandId = form.brand_id;
+    if (!brandId && form.new_brand_name.trim()) {
+      const { data: newBrand, error: brandErr } = await supabase
+        .from("brands")
+        .insert({ company_name: form.new_brand_name.trim() })
+        .select()
+        .single();
+      if (brandErr) {
+        alert("Failed to create brand: " + brandErr.message);
+        return;
+      }
+      brandId = newBrand.id;
+    }
+
+    if (!brandId) {
+      alert("Select an existing brand or enter a new brand name.");
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const response = await fetch("/api/deals/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          deal_name: form.deal_name.trim(),
+          creator_id: creatorId,
+          brand_id: brandId,
+          amount: Number(form.amount),
+          due_date: form.due_date,
+        }),
+      });
+      const result = await response.json();
+
+      if (response.ok && result.success) {
+        if (result.checkout_url) {
+          alert(
+            "Deal created! Redirecting brand to Dodo Payments checkout...",
+          );
+          window.open(result.checkout_url, "_blank", "noopener,noreferrer");
+        } else {
+          alert("Deal created!");
+        }
+        setShowCreateModal(false);
+        setForm({
+          deal_name: "",
+          brand_id: "",
+          new_brand_name: "",
+          amount: "",
+          due_date: "",
+        });
+        fetchData();
+      } else {
+        alert("Failed to create deal: " + (result.error || "Unknown error"));
+      }
+    } catch (err) {
+      console.error("Create deal error:", err);
+      alert("Failed to create deal. Check console for details.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
 
   const getStatusBadge = (status: string, color: string) => {
     const colors = {
@@ -115,6 +299,17 @@ export default function DealsPage() {
     };
     return `px-2 py-1 ${colors[color as keyof typeof colors]} text-[10px] uppercase font-bold rounded tracking-wider border`;
   };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
+          <p className="text-slate-400">Loading deals...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background">
@@ -198,25 +393,29 @@ export default function DealsPage() {
         </div>
 
         <div className="flex items-center gap-4">
-          <button className="hover:bg-white/5 rounded-full p-2 transition-all text-slate-400">
-            <span className="material-symbols-outlined">notifications</span>
-          </button>
+          <NotificationBell />
           <button className="hover:bg-white/5 rounded-full p-2 transition-all text-slate-400">
             <span className="material-symbols-outlined">history</span>
           </button>
-          <button className="bg-primary-container text-on-primary-container font-semibold px-4 py-2 rounded-lg text-sm transition-all shadow-lg shadow-purple-500/20 active:scale-95">
-            Instant Advance
+          <button
+            onClick={() => setShowCreateModal(true)}
+            className="bg-primary-container text-on-primary-container font-semibold px-4 py-2 rounded-lg text-sm transition-all shadow-lg shadow-purple-500/20 active:scale-95"
+          >
+            New Deal
           </button>
-          <img
-            alt="Creator Profile"
-            className="h-10 w-10 rounded-full border-2 border-purple-500/30 object-cover"
-            src="https://lh3.googleusercontent.com/aida-public/AB6AXuDl_NVkyW8cyz9fizMsYf_e-H4gioVKYojBbAgEnhCkEX4Pc_yNkMumxkS6Af3EGQri09xvAWBX0KqVCMkmkKizeRo99AahLCBv_yBg0k5QI51ayNXWYqLn_ueWiBiyLaUnh1bajooI-YteZSS-mtK34WoABDmSUUUOVnMUoZ-MtI1Isfwcr7ZohWQ2SqyAjyqozccoD_m8gu7sUcGCCgVVUGgYxAUOQX6YCZ3iCPgUJ5JV9jZq0rFh-PAt4xkf92HFNhUmcuPI7j1Q"
-          />
         </div>
       </header>
 
       <main className="ml-64 p-8 min-h-[calc(100vh-64px)]">
         <div className="max-w-7xl mx-auto space-y-8">
+          {!authed && (
+            <div className="glass-card rounded-xl p-6 border border-yellow-500/20 bg-yellow-500/5">
+              <p className="text-yellow-400 text-sm">
+                Sign in to see and create your deals.
+              </p>
+            </div>
+          )}
+
           <section className="relative rounded-3xl overflow-hidden p-10 mesh-gradient border border-white/5">
             <div className="relative z-10 flex flex-col md:flex-row md:items-end justify-between gap-8">
               <div>
@@ -228,28 +427,29 @@ export default function DealsPage() {
                 </h2>
                 <div className="flex items-baseline gap-3">
                   <span className="text-on-surface font-display-xl text-display-xl">
-                    ${dealsData.activePipeline.toLocaleString()}
+                    ${activePipeline.toLocaleString()}
                   </span>
                   <span className="text-secondary font-data-mono text-body-md">
-                    +{dealsData.growth}% vs last mo
+                    {deals.length} deal{deals.length === 1 ? "" : "s"}
                   </span>
                 </div>
               </div>
               <div className="flex flex-col gap-4 min-w-[280px]">
                 <div className="flex justify-between text-sm mb-1">
-                  <span className="text-slate-400">Campaign Fulfillment</span>
+                  <span className="text-slate-400">Pipeline Fulfillment</span>
                   <span className="text-on-surface font-data-mono">
-                    {dealsData.pipelineProgress}%
+                    {pipelineProgress}%
                   </span>
                 </div>
                 <div className="h-3 w-full bg-slate-800 rounded-full overflow-hidden">
                   <div
                     className="h-full bg-gradient-to-r from-primary to-secondary shadow-[0_0_12px_rgba(153,69,255,0.4)]"
-                    style={{ width: `${dealsData.pipelineProgress}%` }}
+                    style={{ width: `${pipelineProgress}%` }}
                   ></div>
                 </div>
                 <p className="text-xs text-slate-500 italic">
-                  4 of 7 key milestones reached this week
+                  {deals.filter((d) => d.status === "Completed").length} of{" "}
+                  {deals.length} completed
                 </p>
               </div>
             </div>
@@ -257,24 +457,18 @@ export default function DealsPage() {
 
           <section className="flex flex-wrap items-center justify-between gap-4">
             <div className="flex items-center gap-2">
-              <button className="bg-surface-container-high text-on-surface px-4 py-2 rounded-xl text-sm font-medium border border-white/10 hover:border-primary/50 transition-all flex items-center gap-2">
-                <span className="material-symbols-outlined text-lg">
-                  filter_list
-                </span>
-                All Status
-              </button>
-              <button className="bg-surface-container-high text-on-surface px-4 py-2 rounded-xl text-sm font-medium border border-white/10 hover:border-primary/50 transition-all flex items-center gap-2">
-                <span className="material-symbols-outlined text-lg">
-                  calendar_today
-                </span>
-                Date Range
-              </button>
-              <button className="bg-surface-container-high text-on-surface px-4 py-2 rounded-xl text-sm font-medium border border-white/10 hover:border-primary/50 transition-all flex items-center gap-2">
-                <span className="material-symbols-outlined text-lg">
-                  payments
-                </span>
-                Value Tier
-              </button>
+              <select
+                value={filterStatus}
+                onChange={(e) => setFilterStatus(e.target.value)}
+                className="bg-surface-container-high text-on-surface px-4 py-2 rounded-xl text-sm font-medium border border-white/10 hover:border-primary/50 transition-all"
+              >
+                <option value="all">All Status</option>
+                <option value="active">Active</option>
+                <option value="in review">In Review</option>
+                <option value="completed">Completed</option>
+                <option value="cancelled">Cancelled</option>
+                <option value="pending">Pending</option>
+              </select>
             </div>
             <button
               onClick={() => setShowCreateModal(true)}
@@ -285,127 +479,148 @@ export default function DealsPage() {
             </button>
           </section>
 
-          <section className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
-            {dealsData.deals.map((deal) => (
-              <div
-                key={deal.id}
-                className="glass-card rounded-2xl p-6 flex flex-col group hover:border-primary/30 transition-all"
-              >
-                <div className="flex justify-between items-start mb-6">
-                  <div className="flex items-center gap-3">
-                    <div className="w-12 h-12 rounded-xl bg-slate-800 flex items-center justify-center border border-white/10">
-                      <span
-                        className={`material-symbols-outlined ${
-                          deal.statusColor === "primary"
-                            ? "text-primary"
-                            : deal.statusColor === "secondary"
-                              ? "text-secondary"
-                              : "text-error"
-                        }`}
-                      >
-                        {deal.icon}
-                      </span>
-                    </div>
-                    <div>
-                      <h3 className="font-headline-md text-on-surface">
-                        {deal.name}
-                      </h3>
-                      <p className="text-xs text-slate-500">
-                        Contract ID: {deal.contractId}
-                      </p>
-                    </div>
-                  </div>
-                  <div
-                    className={getStatusBadge(deal.status, deal.statusColor)}
-                  >
-                    {deal.status}
-                  </div>
-                </div>
-
-                <div className="space-y-4 mb-8">
-                  <div className="flex justify-between text-sm">
-                    <span className="text-slate-400">Client</span>
-                    <span className="text-on-surface font-medium">
-                      {deal.client}
-                    </span>
-                  </div>
-                  <div className="flex justify-between text-sm">
-                    <span className="text-slate-400">Total Value</span>
-                    <span className="text-on-surface font-data-mono">
-                      ${deal.totalValue.toLocaleString()}
-                    </span>
-                  </div>
-                  <div className="flex justify-between text-sm">
-                    <span className="text-slate-400">Deadline</span>
-                    <span className="text-on-surface">{deal.deadline}</span>
-                  </div>
-                </div>
-
-                <div className="mt-auto">
-                  <div className="flex justify-between text-xs mb-2">
-                    <span className="text-slate-400">
-                      Milestone: {deal.milestone}
-                    </span>
-                    <span className="text-on-surface">{deal.progress}%</span>
-                  </div>
-                  <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
-                    <div
-                      className={`h-full ${
-                        deal.statusColor === "primary"
-                          ? "bg-primary"
-                          : deal.statusColor === "secondary"
-                            ? "bg-secondary"
-                            : "bg-error"
-                      }`}
-                      style={{ width: `${deal.progress}%` }}
-                    ></div>
-                  </div>
-                </div>
-
-                <div className="mt-6 flex gap-3">
-                  <button className="flex-1 py-2 bg-surface-container-highest border border-white/5 rounded-lg text-xs font-medium hover:bg-white/10 transition-colors">
-                    View Contract
-                  </button>
-                  <button className="w-10 h-10 bg-surface-container-highest border border-white/5 rounded-lg flex items-center justify-center hover:text-primary transition-colors">
-                    <span className="material-symbols-outlined text-lg">
-                      more_horiz
-                    </span>
-                  </button>
-                </div>
+          {filteredDeals.length === 0 ? (
+            <div className="glass-card rounded-2xl p-16 text-center">
+              <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-white/5 flex items-center justify-center">
+                <span className="material-symbols-outlined text-3xl text-slate-500">
+                  inbox
+                </span>
               </div>
-            ))}
-
-            <div className="glass-card rounded-2xl p-6 flex flex-col group hover:border-primary/30 transition-all border-dashed border-white/10 bg-transparent">
-              <div className="flex-1 flex flex-col items-center justify-center text-center p-8">
-                <div className="w-16 h-16 rounded-full bg-white/5 border border-white/10 flex items-center justify-center mb-4 text-slate-500 group-hover:text-primary transition-colors">
-                  <span className="material-symbols-outlined text-3xl">
-                    add_circle
-                  </span>
-                </div>
-                <h3 className="font-headline-md text-slate-300 mb-2">
-                  New Partnership?
-                </h3>
-                <p className="text-sm text-slate-500 max-w-[180px]">
-                  Draft a new deal and generate a secure Revifi contract link.
-                </p>
+              <h3 className="text-white font-headline-md mb-2">
+                {deals.length === 0 ? "No deals yet" : "No deals match this filter"}
+              </h3>
+              <p className="text-slate-400 text-sm mb-6">
+                {deals.length === 0
+                  ? "Create your first deal to start tracking sponsorship contracts and instant advances."
+                  : "Try changing the status filter."}
+              </p>
+              {deals.length === 0 && (
                 <button
                   onClick={() => setShowCreateModal(true)}
-                  className="mt-6 text-primary text-sm font-medium hover:underline"
+                  className="bg-primary-container text-white px-6 py-3 rounded-lg font-semibold hover:opacity-90 transition-all"
                 >
-                  Browse Templates
+                  Create First Deal
                 </button>
-              </div>
+              )}
             </div>
-          </section>
+          ) : (
+            <section className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
+              {filteredDeals.map((deal) => (
+                <div
+                  key={deal.id}
+                  className="glass-card rounded-2xl p-6 flex flex-col group hover:border-primary/30 transition-all"
+                >
+                  <div className="flex justify-between items-start mb-6">
+                    <div className="flex items-center gap-3">
+                      <div className="w-12 h-12 rounded-xl bg-slate-800 flex items-center justify-center border border-white/10">
+                        <span
+                          className={`material-symbols-outlined ${
+                            deal.statusColor === "primary"
+                              ? "text-primary"
+                              : deal.statusColor === "secondary"
+                                ? "text-secondary"
+                                : "text-error"
+                          }`}
+                        >
+                          {deal.icon}
+                        </span>
+                      </div>
+                      <div>
+                        <h3 className="font-headline-md text-on-surface">
+                          {deal.name}
+                        </h3>
+                        <p className="text-xs text-slate-500">
+                          Contract ID: {deal.contractId}
+                        </p>
+                      </div>
+                    </div>
+                    <div className={getStatusBadge(deal.status, deal.statusColor)}>
+                      {deal.status}
+                    </div>
+                  </div>
+
+                  <div className="space-y-4 mb-8">
+                    <div className="flex justify-between text-sm">
+                      <span className="text-slate-400">Client</span>
+                      <span className="text-on-surface font-medium">
+                        {deal.client}
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-slate-400">Total Value</span>
+                      <span className="text-on-surface font-data-mono">
+                        ${deal.totalValue.toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-slate-400">Deadline</span>
+                      <span className="text-on-surface">{deal.deadline}</span>
+                    </div>
+                  </div>
+
+                  <div className="mt-auto">
+                    <div className="flex justify-between text-xs mb-2">
+                      <span className="text-slate-400">
+                        Milestone: {deal.milestone}
+                      </span>
+                      <span className="text-on-surface">{deal.progress}%</span>
+                    </div>
+                    <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full ${
+                          deal.statusColor === "primary"
+                            ? "bg-primary"
+                            : deal.statusColor === "secondary"
+                              ? "bg-secondary"
+                              : "bg-error"
+                        }`}
+                        style={{ width: `${deal.progress}%` }}
+                      ></div>
+                    </div>
+                  </div>
+
+                  <div className="mt-6 flex gap-3">
+                    <button className="flex-1 py-2 bg-surface-container-highest border border-white/5 rounded-lg text-xs font-medium hover:bg-white/10 transition-colors">
+                      View Contract
+                    </button>
+                    <button className="w-10 h-10 bg-surface-container-highest border border-white/5 rounded-lg flex items-center justify-center hover:text-primary transition-colors">
+                      <span className="material-symbols-outlined text-lg">
+                        more_horiz
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              ))}
+
+              <div className="glass-card rounded-2xl p-6 flex flex-col group hover:border-primary/30 transition-all border-dashed border-white/10 bg-transparent">
+                <div className="flex-1 flex flex-col items-center justify-center text-center p-8">
+                  <div className="w-16 h-16 rounded-full bg-white/5 border border-white/10 flex items-center justify-center mb-4 text-slate-500 group-hover:text-primary transition-colors">
+                    <span className="material-symbols-outlined text-3xl">
+                      add_circle
+                    </span>
+                  </div>
+                  <h3 className="font-headline-md text-slate-300 mb-2">
+                    New Partnership?
+                  </h3>
+                  <p className="text-sm text-slate-500 max-w-[180px]">
+                    Draft a new deal and generate a secure Revifi contract link.
+                  </p>
+                  <button
+                    onClick={() => setShowCreateModal(true)}
+                    className="mt-6 text-primary text-sm font-medium hover:underline"
+                  >
+                    Create deal
+                  </button>
+                </div>
+              </div>
+            </section>
+          )}
 
           <section className="glass-card rounded-2xl overflow-hidden">
             <div className="px-8 py-6 border-b border-white/5 flex justify-between items-center">
               <h3 className="font-headline-md text-on-surface">
                 Recent Contract Activity
               </h3>
-              <button className="text-primary text-sm font-medium">
-                View Archive
-              </button>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
@@ -413,62 +628,63 @@ export default function DealsPage() {
                   <tr className="text-slate-500 text-xs font-data-mono uppercase tracking-widest border-b border-white/5">
                     <th className="px-8 py-4 font-medium">Agreement Name</th>
                     <th className="px-8 py-4 font-medium">Counterparty</th>
-                    <th className="px-8 py-4 font-medium">Execution Date</th>
+                    <th className="px-8 py-4 font-medium">Deadline</th>
                     <th className="px-8 py-4 font-medium">Amount</th>
                     <th className="px-8 py-4 font-medium">Status</th>
-                    <th className="px-8 py-4 font-medium">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
-                  {dealsData.recentActivity.map((activity) => (
-                    <tr
-                      key={activity.id}
-                      className="hover:bg-white/5 transition-colors group"
-                    >
-                      <td className="px-8 py-5">
-                        <div className="flex items-center gap-3">
-                          <span className="material-symbols-outlined text-slate-500 group-hover:text-primary">
-                            description
-                          </span>
-                          <span className="text-on-surface font-medium text-sm">
-                            {activity.name}
-                          </span>
-                        </div>
-                      </td>
-                      <td className="px-8 py-5 text-sm text-slate-300">
-                        {activity.counterparty}
-                      </td>
-                      <td className="px-8 py-5 text-sm text-slate-300">
-                        {activity.date}
-                      </td>
-                      <td className="px-8 py-5 text-sm text-on-surface font-data-mono">
-                        ${activity.amount.toLocaleString()}
-                      </td>
-                      <td className="px-8 py-5">
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={`w-2 h-2 rounded-full ${
-                              activity.status === "Settled"
-                                ? "bg-secondary shadow-[0_0_8px_rgba(0,236,147,0.5)]"
-                                : "bg-slate-500"
-                            }`}
-                          ></span>
-                          <span className="text-xs text-on-surface">
-                            {activity.status}
-                          </span>
-                        </div>
-                      </td>
-                      <td className="px-8 py-5">
-                        <button className="text-slate-500 hover:text-white transition-colors">
-                          <span className="material-symbols-outlined text-lg">
-                            {activity.status === "Settled"
-                              ? "download"
-                              : "history"}
-                          </span>
-                        </button>
+                  {recentActivity.length === 0 ? (
+                    <tr>
+                      <td
+                        colSpan={5}
+                        className="text-center text-slate-500 py-12"
+                      >
+                        No deals to show
                       </td>
                     </tr>
-                  ))}
+                  ) : (
+                    recentActivity.map((activity) => (
+                      <tr
+                        key={activity.id}
+                        className="hover:bg-white/5 transition-colors group"
+                      >
+                        <td className="px-8 py-5">
+                          <div className="flex items-center gap-3">
+                            <span className="material-symbols-outlined text-slate-500 group-hover:text-primary">
+                              description
+                            </span>
+                            <span className="text-on-surface font-medium text-sm">
+                              {activity.name}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="px-8 py-5 text-sm text-slate-300">
+                          {activity.counterparty}
+                        </td>
+                        <td className="px-8 py-5 text-sm text-slate-300">
+                          {activity.date}
+                        </td>
+                        <td className="px-8 py-5 text-sm text-on-surface font-data-mono">
+                          ${activity.amount.toLocaleString()}
+                        </td>
+                        <td className="px-8 py-5">
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`w-2 h-2 rounded-full ${
+                                activity.status === "Completed"
+                                  ? "bg-secondary shadow-[0_0_8px_rgba(0,236,147,0.5)]"
+                                  : "bg-slate-500"
+                              }`}
+                            ></span>
+                            <span className="text-xs text-on-surface">
+                              {activity.status}
+                            </span>
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
@@ -496,6 +712,10 @@ export default function DealsPage() {
                 </label>
                 <input
                   type="text"
+                  value={form.deal_name}
+                  onChange={(e) =>
+                    setForm({ ...form, deal_name: e.target.value })
+                  }
                   placeholder="e.g., Summer Campaign 2024"
                   className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary"
                 />
@@ -503,12 +723,33 @@ export default function DealsPage() {
 
               <div>
                 <label className="block text-sm font-medium text-slate-300 mb-2">
-                  Client / Brand
+                  Brand
                 </label>
+                <select
+                  value={form.brand_id}
+                  onChange={(e) =>
+                    setForm({ ...form, brand_id: e.target.value })
+                  }
+                  className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary"
+                >
+                  <option value="">— Select existing brand —</option>
+                  {brands.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.company_name}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-slate-500 mt-1">
+                  Or add a new brand:
+                </p>
                 <input
                   type="text"
-                  placeholder="Brand name"
-                  className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary"
+                  value={form.new_brand_name}
+                  onChange={(e) =>
+                    setForm({ ...form, new_brand_name: e.target.value })
+                  }
+                  placeholder="New brand name"
+                  className="mt-2 w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary"
                 />
               </div>
 
@@ -519,6 +760,10 @@ export default function DealsPage() {
                   </label>
                   <input
                     type="number"
+                    value={form.amount}
+                    onChange={(e) =>
+                      setForm({ ...form, amount: e.target.value })
+                    }
                     placeholder="Amount"
                     className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary"
                   />
@@ -529,47 +774,24 @@ export default function DealsPage() {
                   </label>
                   <input
                     type="date"
+                    value={form.due_date}
+                    onChange={(e) =>
+                      setForm({ ...form, due_date: e.target.value })
+                    }
                     className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary"
                   />
                 </div>
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-2">
-                  Milestones
-                </label>
-                <div className="space-y-3">
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      placeholder="Milestone name"
-                      className="flex-1 bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary"
-                    />
-                    <input
-                      type="number"
-                      placeholder="%"
-                      className="w-24 bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary"
-                    />
-                  </div>
-                  <button className="text-primary text-sm flex items-center gap-1">
-                    <span className="material-symbols-outlined text-sm">
-                      add
-                    </span>
-                    Add Milestone
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-slate-300 mb-2">
-                  Template
-                </label>
-                <select className="w-full bg-surface-container border border-white/10 rounded-lg px-4 py-2 text-white focus:outline-none focus:ring-1 focus:ring-primary">
-                  <option>Standard Service Agreement</option>
-                  <option>Sponsorship Deal</option>
-                  <option>Content Creation Contract</option>
-                  <option>Affiliate Partnership</option>
-                </select>
+              <div className="bg-secondary-container/10 rounded-xl p-4 border border-secondary-container/20">
+                <p className="text-xs text-secondary-container font-bold uppercase tracking-widest mb-1">
+                  How it works
+                </p>
+                <p className="text-sm text-slate-300">
+                  Creating a deal generates a Dodo Payments checkout link for
+                  the brand. Once they pay, the funds enter escrow and you can
+                  request an instant advance against the invoice.
+                </p>
               </div>
 
               <div className="flex gap-3 pt-4">
@@ -580,13 +802,11 @@ export default function DealsPage() {
                   Cancel
                 </button>
                 <button
-                  onClick={() => {
-                    setShowCreateModal(false);
-                    alert("Deal created successfully!");
-                  }}
-                  className="flex-1 bg-gradient-to-r from-primary-container to-inverse-primary text-white py-3 rounded-lg hover:brightness-110 transition-all font-semibold"
+                  onClick={createDeal}
+                  disabled={submitting}
+                  className="flex-1 bg-gradient-to-r from-primary-container to-inverse-primary text-white py-3 rounded-lg hover:brightness-110 transition-all font-semibold disabled:opacity-50"
                 >
-                  Create Deal
+                  {submitting ? "Creating..." : "Create Deal"}
                 </button>
               </div>
             </div>

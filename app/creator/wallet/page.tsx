@@ -5,6 +5,9 @@ import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { getSolBalance, getUSDCBalance } from "@/lib/solana";
 import AuthButton from "@/components/AuthButton";
+import NotificationBell from "@/components/NotificationBell";
+import PhantomConnect from "@/components/PhantomConnect";
+import { downloadCsv } from "@/lib/csv";
 
 interface ActivityItem {
   id: string;
@@ -51,8 +54,64 @@ export default function WalletPage() {
   const supabase = createClient();
 
   useEffect(() => {
+    let txChannel: ReturnType<typeof supabase.channel> | null = null;
+    let userChannel: ReturnType<typeof supabase.channel> | null = null;
     fetchWalletData();
+
+    (async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+
+      txChannel = supabase
+        .channel(`wallet_tx_${user.id}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "transactions",
+            filter: `user_id=eq.${user.id}`,
+          },
+          () => fetchWalletData(),
+        )
+        .subscribe();
+
+      userChannel = supabase
+        .channel(`wallet_user_${user.id}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "UPDATE",
+            schema: "public",
+            table: "users",
+            filter: `id=eq.${user.id}`,
+          },
+          () => fetchWalletData(),
+        )
+        .subscribe();
+    })();
+
+    return () => {
+      if (txChannel) supabase.removeChannel(txChannel);
+      if (userChannel) supabase.removeChannel(userChannel);
+    };
   }, []);
+
+  function exportActivityCsv() {
+    const rows = walletData.recentActivity.map((a) => ({
+      id: a.id,
+      type: a.type,
+      title: a.title,
+      description: a.description,
+      date: a.date,
+      status: a.status,
+      direction: a.transactionType,
+      amount_usd: a.amount,
+    }));
+    downloadCsv(rows, `revifi-wallet-${Date.now()}.csv`);
+  }
 
   async function fetchWalletData() {
     setLoading(true);
@@ -281,18 +340,19 @@ export default function WalletPage() {
 
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-2">
-            <button className="hover:bg-white/5 rounded-full p-2 transition-all text-slate-400 relative">
-              <span className="material-symbols-outlined">notifications</span>
-              <span className="absolute top-2 right-2 w-2 h-2 bg-secondary-container rounded-full border-2 border-slate-950"></span>
-            </button>
-            <button className="hover:bg-white/5 rounded-full p-2 transition-all text-slate-400">
-              <span className="material-symbols-outlined">history</span>
+            <NotificationBell />
+            <button
+              onClick={exportActivityCsv}
+              className="hover:bg-white/5 rounded-full p-2 transition-all text-slate-400"
+              title="Download CSV"
+            >
+              <span className="material-symbols-outlined">download</span>
             </button>
           </div>
-          <button className="bg-primary-container hover:bg-primary-container/90 text-on-primary-container px-6 py-2 rounded-full font-bold text-sm transition-all flex items-center gap-2 shadow-lg shadow-purple-500/20">
-            <span className="material-symbols-outlined text-sm">bolt</span>
-            Instant Advance
-          </button>
+          <PhantomConnect
+            initialAddress={walletData.walletAddress}
+            onChange={() => fetchWalletData()}
+          />
         </div>
       </header>
 
@@ -547,7 +607,10 @@ export default function WalletPage() {
             <h3 className="text-headline-md font-headline-md text-white">
               Recent Activity
             </h3>
-            <button className="text-sm font-bold text-primary hover:underline">
+            <button
+              onClick={exportActivityCsv}
+              className="text-sm font-bold text-primary hover:underline"
+            >
               Download CSV
             </button>
           </div>

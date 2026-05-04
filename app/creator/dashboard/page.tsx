@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import AuthButton from "@/components/AuthButton";
+import NotificationBell from "@/components/NotificationBell";
 
 interface DashboardStats {
   availableLiquidity: number;
@@ -285,10 +286,7 @@ export default function CreatorDashboard() {
         </div>
 
         <div className="flex items-center gap-4">
-          <button className="hover:bg-white/5 rounded-full p-2 transition-all text-slate-400 relative">
-            <span className="material-symbols-outlined">notifications</span>
-            <span className="absolute top-2 right-2 w-2 h-2 bg-purple-500 rounded-full border-2 border-slate-950"></span>
-          </button>
+          <NotificationBell />
           <button className="hover:bg-white/5 rounded-full p-2 transition-all text-slate-400">
             <span className="material-symbols-outlined">history</span>
           </button>

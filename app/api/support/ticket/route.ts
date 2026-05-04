@@ -21,13 +21,22 @@ export async function POST(req: Request) {
       );
     }
 
-    const { error } = await supabase.from("notifications").insert({
-      user_id: user.id,
-      title: `Support Ticket: ${subject}`,
-      message,
-      type: "system",
-      metadata: { ticket: true, status: "open" },
-    });
+    const { error } = await supabase.from("notifications").insert([
+      {
+        user_id: user.id,
+        title: `Support Ticket: ${subject}`,
+        message,
+        type: "system",
+        metadata: { ticket: true, status: "open" },
+      },
+      {
+        user_id: user.id,
+        title: "We received your message",
+        message: `Our team will reply about "${subject}" within 24-48 hours.`,
+        type: "system",
+        metadata: { confirmation: true },
+      },
+    ]);
 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 });
