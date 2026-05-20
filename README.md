@@ -11,6 +11,11 @@
 </p>
 
 ---
+## Pitch Video
+https://www.youtube.com/watch?v=DhfRXccPaGc
+
+## Demo Video
+https://www.youtube.com/watch?v=xbgHhAsHXek
 
 ## What is Revifi?
 
